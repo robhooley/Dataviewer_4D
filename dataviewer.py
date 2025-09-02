@@ -576,8 +576,16 @@ def visualiser():
         circle_center[1] = cy
 
         # Reflect immediately
-        update_pointer_image(cx, cy)
+        #update_pointer_image(cx, cy)
+        # Reflect immediately
+        update_pointer_image(circle_center[0], circle_center[1])
+        try:
+            # If we know last scan coords from the left label, keep them; otherwise show center only
+            right_status_var.set(f"Scan: (—, —)  |  center: ({circle_center[0]}, {circle_center[1]})")
+        except Exception:
+            pass
         update_function()
+        #update_function()
 
     def on_click(event):
         """
@@ -615,53 +623,73 @@ def visualiser():
 
     def toggle_mouse_motion(event=None):
         """
-        Toggles the mouse motion functionality on and off with right-click.
+        Toggle mouse motion on/off with middle click.
         """
-        global mouse_motion_enabled  # Access the global variable
+        global mouse_motion_enabled
         mouse_motion_enabled = not mouse_motion_enabled
-        state = "enabled" if mouse_motion_enabled else "suspended"
+        state = "on" if mouse_motion_enabled else "off"
         print(f"Mouse motion functionality is now {state}.")
+        try:
+            # keep last coords if any; just reflect state
+            txt = left_status_var.get()
+            # overwrite the tail after ' | '
+            if " | " in txt:
+                left_status_var.set(txt.split(" | ")[0] + f"  |  motion: {state}")
+            else:
+                left_status_var.set(f"Mouse: (—, —)  |  motion: {state}")
+        except Exception:
+            pass
 
     def _on_mouse_motion(event):
         """
-        Handles mouse motion over the main (navigator) image.
-        Updates the right-hand pointer image based on cursor position,
-        respecting aspect-preserving scaling and centering.
+        Updates the pointer image & labels based on cursor position
+        over the navigator (left) image.
         """
         global mouse_motion_enabled
         if not mouse_motion_enabled:
+            # still show status
+            try:
+                left_status_var.set(f"Mouse: (paused)  |  motion: off")
+            except Exception:
+                pass
             return
 
         if data_array is None or main_image_pil is None:
             return
 
-        # Geometry recorded by update_main_image()
         geom = getattr(main_canvas, "display_geom", None)
         if not geom:
-            return  # nothing drawn yet
+            return
 
         x0, y0 = geom["x0"], geom["y0"]
         iw, ih = geom["img_w"], geom["img_h"]
         sx, sy = geom["scale_x"], geom["scale_y"]
-        ow, oh = geom["orig_w"], geom["orig_h"]  # navigator size
+        ow, oh = geom["orig_w"], geom["orig_h"]
 
-        # Only react when inside the drawn image rect
         x_canvas, y_canvas = event.x, event.y
         if not (x0 <= x_canvas < x0 + iw and y0 <= y_canvas < y0 + ih):
             return
 
-        # Canvas → resized → original navigator indices
         rx = x_canvas - x0
         ry = y_canvas - y0
         x_nav = int(rx * sx)
         y_nav = int(ry * sy)
-
-        # Clamp to valid navigator pixels
         x_nav = max(0, min(ow - 1, x_nav))
         y_nav = max(0, min(oh - 1, y_nav))
 
-        # data_array indexing is [y, x]
+        # Update the pointer image (right view)
         update_pointer_image(x_nav, y_nav)
+        H, W = data_array.shape[2], data_array.shape[3]
+        right_status_var.set(
+            f"Scan: ({x_nav}, {y_nav})  |  center: ({circle_center[0]}, {circle_center[1]})  |  DP: {W}×{H}")
+
+        # Update labels
+        try:
+            left_status_var.set(f"Mouse: ({x_nav}, {y_nav})  |  motion: on")
+            # Show scan index and current detector center
+            right_status_var.set(f"Scan: ({x_nav}, {y_nav})  |  center: ({circle_center[0]}, {circle_center[1]})")
+        except Exception:
+            pass
 
     def load_npy_with_progress(path):
         # This creates a memmap immediately
@@ -1145,12 +1173,9 @@ def visualiser():
     load_button = tk.Button(top_frame, text="Load Numpy Array", command=load_data)
     load_button.pack(side=tk.LEFT, padx=5, pady=5)
 
-
-
     #Load Series button
     load_series_b = tk.Button(top_frame, text="Load .tiff series", command=load_series)
     load_series_b.pack(side=tk.LEFT, padx=5, pady=5)
-
 
     #blo reader
     tk.Button(top_frame, text="Load .blo", command=load_blo).pack(side=tk.LEFT, padx=5, pady=5)
@@ -1184,21 +1209,31 @@ def visualiser():
     main_frame = tk.Frame(root)
     main_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-    # Left Canvas (Main Image)
-    main_canvas = tk.Canvas(main_frame, width=1024, height=1024, bg="white") #uses a larger canvas to upscale the virtual images
-    main_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    # ---- Left panel: Navigator + dynamic label ----
+    left_panel = tk.Frame(main_frame)
+    left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    main_canvas = tk.Canvas(left_panel, width=1024, height=1024, bg="white")
+    main_canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
     main_canvas.bind("<Button-1>", on_click)
     main_canvas.bind("<Motion>", _on_mouse_motion)
+    main_canvas.bind("<Button-2>", toggle_mouse_motion)
 
-    # Right Canvas (Pointer Image)
-    pointer_canvas = tk.Canvas(main_frame, width=SQUARE_CANVAS_SIZE, height=SQUARE_CANVAS_SIZE, bg="white")
-    pointer_canvas.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+    left_status_var = tk.StringVar(value="Mouse: (—, —)  |  motion: on")
+    main_label = tk.Label(left_panel, textvariable=left_status_var, justify="center")
+    main_label.pack(side=tk.TOP, pady=5)
+
+    # ---- Right panel: Pointer + dynamic label ----
+    right_panel = tk.Frame(main_frame)
+    right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+
+    pointer_canvas = tk.Canvas(right_panel, width=SQUARE_CANVAS_SIZE, height=SQUARE_CANVAS_SIZE, bg="white")
+    pointer_canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
     pointer_canvas.bind("<Button-1>", on_pointer_click)
-    main_canvas.bind("<Button-2>", toggle_mouse_motion)  # Right-click to toggle mouse motion functionality
 
-    # Set the initial size for canvases
-    main_canvas.config(width=1024, height=1024)
-    pointer_canvas.config(width=SQUARE_CANVAS_SIZE, height=SQUARE_CANVAS_SIZE)
+    right_status_var = tk.StringVar(value="Scan: (—, —)  |  center: (—, —)")
+    pointer_label = tk.Label(right_panel, textvariable=right_status_var, justify="center")
+    pointer_label.pack(side=tk.TOP, pady=5)
 
     # Start the Tkinter main loop
     root.mainloop()
