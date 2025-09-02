@@ -10,10 +10,8 @@ import tifffile as tiff
 import threading,queue
 import numpy as np
 
-
 # Global variable to control mouse motion functionality
 mouse_motion_enabled = True  # Initially enabled
-
 
 def ask_scan_width(parent, guessed_width: int, num_files: int) -> int | None:
     """Modal integer prompt with initial value and proper parenting."""
