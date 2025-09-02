@@ -1,0 +1,9 @@
+numpy==1.26.3
+pillow==10.2.0
+tifffile==2024.8.24
+natsort==8.4.0
+rosettasciio==0.6
+imagecodecs==2024.6.1
+h5py==3.11.0
+pyinstaller==6.15.0
+scikit-image==0.24.0
