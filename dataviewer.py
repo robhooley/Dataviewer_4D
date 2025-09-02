@@ -144,6 +144,7 @@ def visualiser():
     selected_function = tk.StringVar(value="BF")
     radius_value = tk.IntVar(value=25)  # Default radius value
     circle_center = [None, None]  # Default circle center (to be dynamically set)
+    current_scan_xy = [-1, -1]  # [x, y] of the scan position currently shown on the right
 
     # Predefined functions for processing
     functions = {
@@ -513,6 +514,12 @@ def visualiser():
         if data_array is None or main_image_pil is None:
             return
 
+        # Clamp and sync the current scan position
+        Y, X = data_array.shape[0], data_array.shape[1]
+        x = max(0, min(X - 1, int(x)))
+        y = max(0, min(Y - 1, int(y)))
+        current_scan_xy[0], current_scan_xy[1] = x, y
+
         if 0 <= y < data_array.shape[0] and 0 <= x < data_array.shape[1]:
             sub_image = data_array[y, x]
             normalized = normalize_to_8bit(sub_image)
@@ -545,47 +552,33 @@ def visualiser():
 
     def on_pointer_click(event):
         """
-        Set the integration-circle center by clicking the right (pointer) image.
-        Maps from canvas coords → displayed (resized) image → original DP coords.
+        Set the detector center by clicking within the right (pointer) image.
+        Do NOT change which scan (x,y) is displayed here.
         """
         nonlocal circle_center, pointer_image_pil
         if pointer_image_pil is None:
             return
 
-        # The pointer image is rendered at a fixed square size (SQUARE_CANVAS_SIZE)
-        # at (0,0) with anchor=NW. Ignore clicks outside that drawn rect.
         dw = SQUARE_CANVAS_SIZE
         dh = SQUARE_CANVAS_SIZE
         if not (0 <= event.x < dw and 0 <= event.y < dh):
             return
 
-        # Original DP size
         ow, oh = pointer_image_pil.width, pointer_image_pil.height
-        # Scale canvas → original DP
-        scale_x = ow / dw
-        scale_y = oh / dh
-
-        cx = int(event.x * scale_x)
-        cy = int(event.y * scale_y)
-
-        # Clamp inside DP bounds
+        cx = int(event.x * (ow / dw))
+        cy = int(event.y * (oh / dh))
         cx = max(0, min(ow - 1, cx))
         cy = max(0, min(oh - 1, cy))
 
-        circle_center[0] = cx
-        circle_center[1] = cy
+        circle_center[0], circle_center[1] = cx, cy
 
-        # Reflect immediately
-        #update_pointer_image(cx, cy)
-        # Reflect immediately
-        update_pointer_image(circle_center[0], circle_center[1])
-        try:
-            # If we know last scan coords from the left label, keep them; otherwise show center only
-            right_status_var.set(f"Scan: (—, —)  |  center: ({circle_center[0]}, {circle_center[1]})")
-        except Exception:
-            pass
+        # Redraw the scan position (fallback to center if uninitialized)
+        x = current_scan_xy[0] if current_scan_xy[0] >= 0 else (data_array.shape[1] // 2)
+        y = current_scan_xy[1] if current_scan_xy[1] >= 0 else (data_array.shape[0] // 2)
+        update_pointer_image(x, y)
+
+        # If update_function depends on center/radius, recompute the main image:
         update_function()
-        #update_function()
 
     def on_click(event):
         """
@@ -594,31 +587,27 @@ def visualiser():
         """
         if main_image_pil is None:
             return
-
-        # Geometry was stored by update_main_image(); guard against missing
         geom = getattr(main_canvas, "display_geom", None)
         if not geom:
             return
 
         x0, y0 = geom["x0"], geom["y0"]
         iw, ih = geom["img_w"], geom["img_h"]
-
-        # Only accept clicks inside the drawn image area
         if not (x0 <= event.x < x0 + iw and y0 <= event.y < y0 + ih):
             return
 
-        # Canvas → resized-image → original navigator coords
         rx = event.x - x0
         ry = event.y - y0
         x_nav = int(rx * geom["scale_x"])
         y_nav = int(ry * geom["scale_y"])
 
-        # Clamp to navigator bounds
         ow, oh = geom["orig_w"], geom["orig_h"]
         x_nav = max(0, min(ow - 1, x_nav))
         y_nav = max(0, min(oh - 1, y_nav))
 
         clicked_positions.append((x_nav, y_nav))
+        current_scan_xy[0], current_scan_xy[1] = x_nav, y_nav  # <<< keep in sync
+        update_pointer_image(x_nav, y_nav)  # <<< reflect immediately
         update_main_image()
 
     def toggle_mouse_motion(event=None):
@@ -646,14 +635,8 @@ def visualiser():
         over the navigator (left) image.
         """
         global mouse_motion_enabled
-        if not mouse_motion_enabled:
-            # still show status
-            try:
-                left_status_var.set(f"Mouse: (paused)  |  motion: off")
-            except Exception:
-                pass
+        if not mouse_motion_enabled:  # paused: do nothing
             return
-
         if data_array is None or main_image_pil is None:
             return
 
@@ -663,25 +646,21 @@ def visualiser():
 
         x0, y0 = geom["x0"], geom["y0"]
         iw, ih = geom["img_w"], geom["img_h"]
-        sx, sy = geom["scale_x"], geom["scale_y"]
-        ow, oh = geom["orig_w"], geom["orig_h"]
-
-        x_canvas, y_canvas = event.x, event.y
-        if not (x0 <= x_canvas < x0 + iw and y0 <= y_canvas < y0 + ih):
+        if not (x0 <= event.x < x0 + iw and y0 <= event.y < y0 + ih):
             return
 
-        rx = x_canvas - x0
-        ry = y_canvas - y0
-        x_nav = int(rx * sx)
-        y_nav = int(ry * sy)
+        rx = event.x - x0
+        ry = event.y - y0
+        x_nav = int(rx * geom["scale_x"])
+        y_nav = int(ry * geom["scale_y"])
+
+        ow, oh = geom["orig_w"], geom["orig_h"]
         x_nav = max(0, min(ow - 1, x_nav))
         y_nav = max(0, min(oh - 1, y_nav))
 
-        # Update the pointer image (right view)
+        # Update state + redraw pointer image
+        current_scan_xy[0], current_scan_xy[1] = x_nav, y_nav
         update_pointer_image(x_nav, y_nav)
-        H, W = data_array.shape[2], data_array.shape[3]
-        right_status_var.set(
-            f"Scan: ({x_nav}, {y_nav})  |  center: ({circle_center[0]}, {circle_center[1]})  |  DP: {W}×{H}")
 
         # Update labels
         try:
@@ -1040,7 +1019,11 @@ def visualiser():
         # Call the user function with radius and center
         main_image = function(data_array, radius_value.get(), tuple(circle_center))
         main_image_pil = Image.fromarray(normalize_to_8bit(main_image))
-        update_pointer_image(data_array.shape[1] // 2, data_array.shape[0] // 2)  # args: (x, y)
+        #update_pointer_image(data_array.shape[1] // 2, data_array.shape[0] // 2)  # args: (x, y)
+        # Redraw pointer view at the last-used scan position (or center if uninitialized)
+        x = current_scan_xy[0] if current_scan_xy[0] >= 0 else (data_array.shape[1] // 2)
+        y = current_scan_xy[1] if current_scan_xy[1] >= 0 else (data_array.shape[0] // 2)
+        update_pointer_image(x, y)
         update_main_image()
 
     def export_blo():
