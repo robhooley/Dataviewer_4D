@@ -44,7 +44,7 @@ def VADF(image_array,radius,center):
     return VADF_intensity_array
 
 
-def VDF(image_array,radius,center):
+def VDF(image_array,radius,center): #this is the same as the VBF function for now...
     camera_data_shape = image_array[0][0].shape  # shape of first image to get image dimensions
     dataset_shape = image_array.shape[0], image_array.shape[1]  # scanned region shape
     DF_intensity_list = []  # empty list to take virtual bright field image sigals

@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual env
+.venv/
+env/
+venv/
+
+# Build outputs
+build/
+dist/
+*.spec
+
+# IDEs
+.vscode/
+.idea/
+
+# Logs
+*.log
