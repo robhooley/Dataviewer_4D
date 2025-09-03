@@ -9,6 +9,7 @@ from analysis_functions import *
 import tifffile as tiff
 import threading,queue
 import numpy as np
+import json
 
 # Global variable to control mouse motion functionality
 mouse_motion_enabled = True  # Initially enabled
@@ -144,13 +145,94 @@ def visualiser():
     selected_function = tk.StringVar(value="BF")
     radius_value = tk.IntVar(value=25)  # Default radius value
     circle_center = [None, None]  # Default circle center (to be dynamically set)
+    current_scan_xy = [-1, -1]  # [x, y] of the scan position currently shown on the right
 
     # Predefined functions for processing
     functions = {
         "BF": VBF,
         "DF": VDF,
-        "ADF": VADF
+        "ADF": VADF,
+        "Cross Correlation": cross_correlation_map,
     }
+
+    # ---- Metadata state ----
+    current_metadata = {}  # last loaded metadata dict
+
+    def _metadata_clear():
+        current_metadata.clear()
+        for i in metadata_tree.get_children():
+            metadata_tree.delete(i)
+
+    def _insert_tree_dict(tree, parent, data):
+        """Recursively insert dict/list/values into a Treeview."""
+        if isinstance(data, dict):
+            for k, v in data.items():
+                node = tree.insert(parent, "end", text=str(k), values=("",))
+                _insert_tree_dict(tree, node, v)
+        elif isinstance(data, (list, tuple)):
+            for i, v in enumerate(data):
+                node = tree.insert(parent, "end", text=f"[{i}]", values=("",))
+                _insert_tree_dict(tree, node, v)
+        else:
+            # leaf value -> put it in 'Value' column; keep node label in 'Key' column
+            s = repr(data)
+            if len(s) > 500:  # avoid huge blobs
+                s = s[:497] + "..."
+            tree.insert(parent, "end", text="", values=(s,))
+
+    def _metadata_set(meta: dict | None):
+        """Replace the metadata view with a new dict."""
+        _metadata_clear()
+        if not meta:
+            return
+        current_metadata.update(meta)
+        # Add a single root node for readability
+        root_id = metadata_tree.insert("", "end", text="metadata", values=("",))
+        _insert_tree_dict(metadata_tree, root_id, meta)
+        metadata_tree.item(root_id, open=True)
+
+    def load_metadata_json():
+        """User picks a JSON file; display it in the metadata panel."""
+        path = filedialog.askopenfilename(parent=root, filetypes=[("JSON", "*.json"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+        except Exception as e:
+            messagebox.showerror("Load metadata (.json)", f"Failed to read JSON:\n{e}", parent=root)
+            return
+        _metadata_set(meta)
+
+    def clamp_radius(event=None):
+        """
+        Snap the radius to [1, 256] when user presses Enter or leaves the field.
+        If the field is empty or non-numeric, fall back to the last valid value.
+        """
+        # last known-good value
+        current = radius_value.get()
+        s = radius_entry.get().strip()
+
+        if s == "":
+            val = current
+        else:
+            try:
+                val = int(s)
+            except ValueError:
+                val = current
+
+        # clamp
+        val = 1 if val < 1 else (256 if val > 256 else val)
+
+        # reflect in UI + state
+        radius_value.set(val)
+        radius_entry.delete(0, tk.END)
+        radius_entry.insert(0, str(val))
+
+        # re-run your computation if radius affects it
+        update_function()
+
+
 
     # Canvas and state variables
     main_image_pil = None
@@ -513,6 +595,12 @@ def visualiser():
         if data_array is None or main_image_pil is None:
             return
 
+        # Clamp and sync the current scan position
+        Y, X = data_array.shape[0], data_array.shape[1]
+        x = max(0, min(X - 1, int(x)))
+        y = max(0, min(Y - 1, int(y)))
+        current_scan_xy[0], current_scan_xy[1] = x, y
+
         if 0 <= y < data_array.shape[0] and 0 <= x < data_array.shape[1]:
             sub_image = data_array[y, x]
             normalized = normalize_to_8bit(sub_image)
@@ -531,8 +619,8 @@ def visualiser():
             draw = ImageDraw.Draw(resized_pointer, "RGBA")
             circle_radius = radius_value.get()
             draw.ellipse(
-                (upscaled_center_x - circle_radius, upscaled_center_y - circle_radius,
-                 upscaled_center_x + circle_radius, upscaled_center_y + circle_radius),
+                (upscaled_center_x - circle_radius*scale_x, upscaled_center_y - circle_radius*scale_y,
+                 upscaled_center_x + circle_radius*scale_x, upscaled_center_y + circle_radius*scale_y),
                 outline=(255, 0, 0, 128),  # Semi-transparent red
                 width=3
             )
@@ -545,47 +633,33 @@ def visualiser():
 
     def on_pointer_click(event):
         """
-        Set the integration-circle center by clicking the right (pointer) image.
-        Maps from canvas coords → displayed (resized) image → original DP coords.
+        Set the detector center by clicking within the right (pointer) image.
+        Do NOT change which scan (x,y) is displayed here.
         """
         nonlocal circle_center, pointer_image_pil
         if pointer_image_pil is None:
             return
 
-        # The pointer image is rendered at a fixed square size (SQUARE_CANVAS_SIZE)
-        # at (0,0) with anchor=NW. Ignore clicks outside that drawn rect.
         dw = SQUARE_CANVAS_SIZE
         dh = SQUARE_CANVAS_SIZE
         if not (0 <= event.x < dw and 0 <= event.y < dh):
             return
 
-        # Original DP size
         ow, oh = pointer_image_pil.width, pointer_image_pil.height
-        # Scale canvas → original DP
-        scale_x = ow / dw
-        scale_y = oh / dh
-
-        cx = int(event.x * scale_x)
-        cy = int(event.y * scale_y)
-
-        # Clamp inside DP bounds
+        cx = int(event.x * (ow / dw))
+        cy = int(event.y * (oh / dh))
         cx = max(0, min(ow - 1, cx))
         cy = max(0, min(oh - 1, cy))
 
-        circle_center[0] = cx
-        circle_center[1] = cy
+        circle_center[0], circle_center[1] = cx, cy
 
-        # Reflect immediately
-        #update_pointer_image(cx, cy)
-        # Reflect immediately
-        update_pointer_image(circle_center[0], circle_center[1])
-        try:
-            # If we know last scan coords from the left label, keep them; otherwise show center only
-            right_status_var.set(f"Scan: (—, —)  |  center: ({circle_center[0]}, {circle_center[1]})")
-        except Exception:
-            pass
+        # Redraw the scan position (fallback to center if uninitialized)
+        x = current_scan_xy[0] if current_scan_xy[0] >= 0 else (data_array.shape[1] // 2)
+        y = current_scan_xy[1] if current_scan_xy[1] >= 0 else (data_array.shape[0] // 2)
+        update_pointer_image(x, y)
+
+        # If update_function depends on center/radius, recompute the main image:
         update_function()
-        #update_function()
 
     def on_click(event):
         """
@@ -594,31 +668,27 @@ def visualiser():
         """
         if main_image_pil is None:
             return
-
-        # Geometry was stored by update_main_image(); guard against missing
         geom = getattr(main_canvas, "display_geom", None)
         if not geom:
             return
 
         x0, y0 = geom["x0"], geom["y0"]
         iw, ih = geom["img_w"], geom["img_h"]
-
-        # Only accept clicks inside the drawn image area
         if not (x0 <= event.x < x0 + iw and y0 <= event.y < y0 + ih):
             return
 
-        # Canvas → resized-image → original navigator coords
         rx = event.x - x0
         ry = event.y - y0
         x_nav = int(rx * geom["scale_x"])
         y_nav = int(ry * geom["scale_y"])
 
-        # Clamp to navigator bounds
         ow, oh = geom["orig_w"], geom["orig_h"]
         x_nav = max(0, min(ow - 1, x_nav))
         y_nav = max(0, min(oh - 1, y_nav))
 
         clicked_positions.append((x_nav, y_nav))
+        current_scan_xy[0], current_scan_xy[1] = x_nav, y_nav  # <<< keep in sync
+        update_pointer_image(x_nav, y_nav)  # <<< reflect immediately
         update_main_image()
 
     def toggle_mouse_motion(event=None):
@@ -646,14 +716,8 @@ def visualiser():
         over the navigator (left) image.
         """
         global mouse_motion_enabled
-        if not mouse_motion_enabled:
-            # still show status
-            try:
-                left_status_var.set(f"Mouse: (paused)  |  motion: off")
-            except Exception:
-                pass
+        if not mouse_motion_enabled:  # paused: do nothing
             return
-
         if data_array is None or main_image_pil is None:
             return
 
@@ -663,25 +727,21 @@ def visualiser():
 
         x0, y0 = geom["x0"], geom["y0"]
         iw, ih = geom["img_w"], geom["img_h"]
-        sx, sy = geom["scale_x"], geom["scale_y"]
-        ow, oh = geom["orig_w"], geom["orig_h"]
-
-        x_canvas, y_canvas = event.x, event.y
-        if not (x0 <= x_canvas < x0 + iw and y0 <= y_canvas < y0 + ih):
+        if not (x0 <= event.x < x0 + iw and y0 <= event.y < y0 + ih):
             return
 
-        rx = x_canvas - x0
-        ry = y_canvas - y0
-        x_nav = int(rx * sx)
-        y_nav = int(ry * sy)
+        rx = event.x - x0
+        ry = event.y - y0
+        x_nav = int(rx * geom["scale_x"])
+        y_nav = int(ry * geom["scale_y"])
+
+        ow, oh = geom["orig_w"], geom["orig_h"]
         x_nav = max(0, min(ow - 1, x_nav))
         y_nav = max(0, min(oh - 1, y_nav))
 
-        # Update the pointer image (right view)
+        # Update state + redraw pointer image
+        current_scan_xy[0], current_scan_xy[1] = x_nav, y_nav
         update_pointer_image(x_nav, y_nav)
-        H, W = data_array.shape[2], data_array.shape[3]
-        right_status_var.set(
-            f"Scan: ({x_nav}, {y_nav})  |  center: ({circle_center[0]}, {circle_center[1]})  |  DP: {W}×{H}")
 
         # Update labels
         try:
@@ -761,36 +821,48 @@ def visualiser():
                 q.put(('error', f"{type(e).__name__}: {e}"))
 
         def pump():
+            def _finish_with_array_and_meta(arr, meta):
+                nonlocal data_array, circle_center
+                arr4d = _coerce_to_4d(arr, root, ask_scan_width)
+                if arr4d is None:
+                    bar.stop();
+                    progress_win.grab_release();
+                    progress_win.destroy()
+                    return
+                data_array = arr4d
+                H, W = data_array.shape[2], data_array.shape[3]
+                circle_center[:] = [W // 2, H // 2]
+                update_pointer_image(data_array.shape[1] // 2, data_array.shape[0] // 2)
+                if isinstance(meta, dict):
+                    _metadata_set(meta)
+                bar.stop();
+                progress_win.grab_release();
+                progress_win.destroy()
+                messagebox.showinfo(title, f"Loaded → navigator {data_array.shape[:2]}", parent=root)
+                update_function()
+
             try:
                 while True:
                     kind, payload = q.get_nowait()
                     if kind == 'status':
                         status_lbl.config(text=str(payload))
                     elif kind == 'done':
-                        # If user cancelled while load was in-flight, drop the result.
                         if cancel_flag['stop']:
                             bar.stop();
                             progress_win.grab_release();
                             progress_win.destroy()
                             messagebox.showinfo(title, "Cancelled.", parent=root)
                             return
-                        arr = payload
-                        arr4d = _coerce_to_4d(arr, root, ask_scan_width)
-                        if arr4d is None:
+                        # payload may be ndarray or (ndarray, meta)
+                        if isinstance(payload, tuple) and len(payload) == 2 and isinstance(payload[0], np.ndarray):
+                            _finish_with_array_and_meta(payload[0], payload[1])
+                        elif isinstance(payload, np.ndarray):
+                            _finish_with_array_and_meta(payload, {})
+                        else:
                             bar.stop();
                             progress_win.grab_release();
                             progress_win.destroy()
-                            return
-                        nonlocal data_array, circle_center
-                        data_array = arr4d
-                        H, W = data_array.shape[2], data_array.shape[3]
-                        circle_center[:] = [W // 2, H // 2]
-                        update_pointer_image(data_array.shape[1] // 2, data_array.shape[0] // 2)
-                        bar.stop();
-                        progress_win.grab_release();
-                        progress_win.destroy()
-                        messagebox.showinfo(title, f"Loaded → navigator {data_array.shape[:2]}", parent=root)
-                        update_function()
+                            messagebox.showerror(title, "Unexpected loader payload.", parent=root)
                         return
                     elif kind == 'error':
                         bar.stop();
@@ -800,7 +872,7 @@ def visualiser():
                         return
             except queue.Empty:
                 pass
-            root.after(50, pump)  # ~20 Hz UI update
+            root.after(50, pump)
 
         threading.Thread(target=worker, daemon=True).start()
         pump()
@@ -837,12 +909,9 @@ def visualiser():
 
     def _read_blo_rsciio_interactive(path: str, parent=None, lazy: bool = False, endianess: str = "<"):
         """Read BLO via rsciio; if multiple datasets exist, ask the user which to load.
-           Returns a plain contiguous np.ndarray, or None if user cancels selection.
+           Returns (np.ndarray, metadata_dict) or (None, None) if user cancels.
         """
-        # Normalize path (avoids mixed slashes / accidental escapes)
         path = os.path.normpath(str(path))
-
-        # Call with only kwargs supported by this rsciio version
         sig = inspect.signature(rs_blo.file_reader)
         kwargs = {}
         if "lazy" in sig.parameters:      kwargs["lazy"] = lazy
@@ -858,7 +927,7 @@ def visualiser():
         else:
             idx = _pick_dataset_index(parent, datasets)
             if idx is None:
-                return None  # user cancelled
+                return None, None  # user cancelled
             d = datasets[idx]
 
         data = d.get("data")
@@ -871,7 +940,15 @@ def visualiser():
         if isinstance(data, np.memmap):  # memmap → numpy
             data = np.array(data, copy=True)
 
-        return np.ascontiguousarray(data)
+        arr = np.ascontiguousarray(data)
+        # Prefer 'metadata'; fallback to 'original_metadata'
+        meta = {}
+        for k in ("metadata", "original_metadata"):
+            v = d.get(k)
+            if isinstance(v, dict):
+                meta = v
+                break
+        return arr, meta
 
     def _extract_rsciio_array(obj):
         """
@@ -936,7 +1013,7 @@ def visualiser():
             if cancel_flag['stop']:
                 return
             try:
-                arr = _read_blo_rsciio_interactive(path, parent=root, lazy=False, endianess="<")
+                arr, meta = _read_blo_rsciio_interactive(path, parent=root, lazy=False, endianess="<")
                 if arr is None:  # user cancelled dataset picker
                     q.put(('error', "Cancelled by user."));
                     return
@@ -945,9 +1022,60 @@ def visualiser():
                 return
             if cancel_flag['stop']:
                 return
-            q.put(('done', arr))
+            q.put(('done', (arr, meta)))
 
-        _load_with_progress(start_fn, "Load .blo")
+        def _pump_done(payload):
+            nonlocal data_array, circle_center
+            arr, meta = payload
+            arr4d = _coerce_to_4d(arr, root, ask_scan_width)
+            if arr4d is None:
+                return
+            data_array = arr4d
+            H, W = data_array.shape[2], data_array.shape[3]
+            circle_center[:] = [W // 2, H // 2]
+            update_pointer_image(data_array.shape[1] // 2, data_array.shape[0] // 2)
+            _metadata_set(meta)
+            messagebox.showinfo("Load .blo", f"Loaded → navigator {data_array.shape[:2]}", parent=root)
+            update_function()
+
+        _load_with_progress(
+            lambda cancel_flag, q: start_fn(cancel_flag, q),
+            "Load .blo"
+        )
+
+    def _extract_array_and_meta(obj):
+        """
+        Try to extract (ndarray, metadata_dict) from rsciio object structures.
+        Looks into dicts/lists for 'data' and ('metadata' or 'original_metadata').
+        """
+
+        def _from_dict(d):
+            if not isinstance(d, dict): return None, None
+            arr = d.get("data")
+            meta = d.get("metadata") or d.get("original_metadata")
+            if isinstance(arr, np.ndarray):
+                return arr, meta if isinstance(meta, dict) else {}
+            # some formats nest deeper
+            for key in ("signals", "Signal", "items", "datasets"):
+                if key in d and isinstance(d[key], (list, tuple)):
+                    for item in d[key]:
+                        a, m = _from_dict(item)
+                        if a is not None:
+                            return a, m
+            return None, None
+
+        if isinstance(obj, np.ndarray):
+            return obj, {}
+        if isinstance(obj, dict):
+            a, m = _from_dict(obj)
+            if a is not None:
+                return a, m
+        if isinstance(obj, (list, tuple)):
+            for item in obj:
+                a, m = _extract_array_and_meta(item)
+                if a is not None:
+                    return a, m
+        return None, {}
 
     def load_hspy():
         nonlocal data_array, circle_center
@@ -958,15 +1086,15 @@ def visualiser():
         def start_fn(cancel_flag, q):
             q.put(('status', "Reading .hspy…"))
             if cancel_flag['stop']: return
-            obj = rs_hspy.file_reader(path)  # may be dict, list, or ndarray
-            if cancel_flag['stop']: return
             try:
-                arr, dbg = _extract_rsciio_array(obj)
+                obj = rs_hspy.file_reader(path)
+                if cancel_flag['stop']: return
+                arr, meta = _extract_array_and_meta(obj)
+                if arr is None:
+                    raise ValueError("Could not find ndarray in .hspy file.")
+                q.put(('done', (arr, meta)))
             except Exception as e:
-                q.put(('error', f"Extract failed: {e}"));
-                return
-            q.put(('status', f"Parsed: {dbg}"))
-            q.put(('done', arr))
+                q.put(('error', f"{type(e).__name__}: {e}"))
 
         _load_with_progress(start_fn, "Load .hspy")
 
@@ -1040,7 +1168,11 @@ def visualiser():
         # Call the user function with radius and center
         main_image = function(data_array, radius_value.get(), tuple(circle_center))
         main_image_pil = Image.fromarray(normalize_to_8bit(main_image))
-        update_pointer_image(data_array.shape[1] // 2, data_array.shape[0] // 2)  # args: (x, y)
+        #update_pointer_image(data_array.shape[1] // 2, data_array.shape[0] // 2)  # args: (x, y)
+        # Redraw pointer view at the last-used scan position (or center if uninitialized)
+        x = current_scan_xy[0] if current_scan_xy[0] >= 0 else (data_array.shape[1] // 2)
+        y = current_scan_xy[1] if current_scan_xy[1] >= 0 else (data_array.shape[0] // 2)
+        update_pointer_image(x, y)
         update_main_image()
 
     def export_blo():
@@ -1181,7 +1313,9 @@ def visualiser():
     tk.Button(top_frame, text="Load .blo", command=load_blo).pack(side=tk.LEFT, padx=5, pady=5)
     #hspy reader
     tk.Button(top_frame, text="Load .hspy", command=load_hspy).pack(side=tk.LEFT, padx=5, pady=5)
-
+    #metadata json loading
+    btn_meta_json = tk.Button(top_frame, text="Load metadata (.json)", command=load_metadata_json)
+    btn_meta_json.pack(side=tk.LEFT, padx=5, pady=5)
     export_blo_btn = tk.Button(top_frame, text="Export .blo", command=export_blo)
     export_blo_btn.pack(side=tk.LEFT, padx=5, pady=5)
 
@@ -1191,14 +1325,14 @@ def visualiser():
     save_images = tk.Button(top_frame, text="Save Images", command=save_images)
     save_images.pack(side=tk.LEFT, padx=5, pady=5)
 
-    # Radius Label and Entry
     radius_label = tk.Label(top_frame, text="Detector Radius (px):")
     radius_label.pack(side=tk.LEFT, padx=5, pady=5)
 
     radius_entry = tk.Entry(top_frame, textvariable=radius_value, width=5)
     radius_entry.pack(side=tk.LEFT, padx=5, pady=5)
-    radius_entry.bind("<Return>", update_function)
 
+    radius_entry.bind("<Return>", lambda e: (clamp_radius(), "break"))
+    radius_entry.bind("<FocusOut>", clamp_radius)
     # Function Dropdown Menu
     function_dropdown = ttk.Combobox(top_frame, textvariable=selected_function, values=list(functions.keys()),
                                      state="readonly")
@@ -1234,6 +1368,24 @@ def visualiser():
     right_status_var = tk.StringVar(value="Scan: (—, —)  |  center: (—, —)")
     pointer_label = tk.Label(right_panel, textvariable=right_status_var, justify="center")
     pointer_label.pack(side=tk.TOP, pady=5)
+
+    # ---- Metadata panel (Treeview) under the right image ----
+    meta_frame = tk.Frame(right_panel)
+    meta_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=(0, 5))
+
+    cols = ("Value",)
+    metadata_tree = ttk.Treeview(meta_frame, columns=cols, show="tree headings", height=12)
+    metadata_tree.heading("#0", text="Key")
+    metadata_tree.heading("Value", text="Value")
+
+    xs = ttk.Scrollbar(meta_frame, orient="horizontal", command=metadata_tree.xview)
+    metadata_tree.configure(xscrollcommand=xs.set)
+
+    ys = ttk.Scrollbar(meta_frame, orient="vertical", command=metadata_tree.yview)
+    metadata_tree.configure(yscrollcommand=ys.set)
+
+    metadata_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    ys.pack(side=tk.RIGHT, fill=tk.Y)
 
     # Start the Tkinter main loop
     root.mainloop()
