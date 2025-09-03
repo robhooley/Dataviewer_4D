@@ -151,7 +151,8 @@ def visualiser():
     functions = {
         "BF": VBF,
         "DF": VDF,
-        "ADF": VADF
+        "ADF": VADF,
+        "Cross Correlation": cross_correlation_map,
     }
 
     # ---- Metadata state ----
@@ -618,8 +619,8 @@ def visualiser():
             draw = ImageDraw.Draw(resized_pointer, "RGBA")
             circle_radius = radius_value.get()
             draw.ellipse(
-                (upscaled_center_x - circle_radius, upscaled_center_y - circle_radius,
-                 upscaled_center_x + circle_radius, upscaled_center_y + circle_radius),
+                (upscaled_center_x - circle_radius*scale_x, upscaled_center_y - circle_radius*scale_y,
+                 upscaled_center_x + circle_radius*scale_x, upscaled_center_y + circle_radius*scale_y),
                 outline=(255, 0, 0, 128),  # Semi-transparent red
                 width=3
             )
