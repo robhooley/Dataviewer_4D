@@ -139,6 +139,10 @@ def visualiser():
     """
     root = tk.Tk()
     root.title("4D Array Visualiser")
+    root.grid_rowconfigure(0, weight=1)  # canvases
+    root.grid_columnconfigure(0, weight=1)  # left panel
+    root.grid_columnconfigure(1, weight=0)  # right panel
+
 
     # Global variables to store the data and selected function
     data_array = None
@@ -146,13 +150,19 @@ def visualiser():
     radius_value = tk.IntVar(value=25)  # Default radius value
     circle_center = [None, None]  # Default circle center (to be dynamically set)
     current_scan_xy = [-1, -1]  # [x, y] of the scan position currently shown on the right
+    df_centers = [list(circle_center)]  # always keep at least one DF center
+    # Canvas and state variables
+    main_image_pil = None
+    pointer_image_pil = None
+    clicked_positions = []  # Store positions of clicks
+    image_refs = {"main_image": None, "current_sub_image": None}  # Prevent garbage collection
 
-    # Predefined functions for processing
+
     functions = {
-        "BF": VBF,
-        "DF": VDF,
-        "ADF": VADF,
-        "Cross Correlation": cross_correlation_map,
+        "BF": {"fn": VBF, "params": ["radius", "center"]},
+        "DF": {"fn": VDF_multi, "params": ["radius", "centers"]},  # handled specially
+        "VADF": {"fn": VADF, "params": ["inner_radius", "outer_radius", "center"]},
+        "Cross Correlation": {"fn": cross_correlation_map, "params":None}
     }
 
     # ---- Metadata state ----
@@ -232,16 +242,6 @@ def visualiser():
         # re-run your computation if radius affects it
         update_function()
 
-
-
-    # Canvas and state variables
-    main_image_pil = None
-    pointer_image_pil = None
-    clicked_positions = []  # Store positions of clicks
-    image_refs = {"main_image": None, "current_sub_image": None}  # Prevent garbage collection
-
-
-
     def save_images():
         """
         Saves the left image (main image with markers), sub-images for clicked positions,
@@ -286,10 +286,9 @@ def visualiser():
         print(f"Images and positions saved to {save_dir}")
         messagebox.showinfo("Save Complete", f"Images and positions saved to {save_dir}")
 
-
     def load_series():
         """Threaded TIFF series loader with progress bar + Cancel."""
-        nonlocal data_array, circle_center
+        nonlocal data_array, circle_center, df_centers
 
         folder_path = filedialog.askdirectory(mustexist=True, parent=root)
         if not folder_path:
@@ -318,31 +317,27 @@ def visualiser():
                                    parent=root)
         scan_height = (N + (scan_width - 1)) // scan_width  # ceil
 
-        # Progress UI
-        progress_frame = tk.Frame(root)
-        progress_frame.pack(side=tk.TOP, pady=10)
-        progress_bar = ttk.Progressbar(progress_frame, orient="horizontal", length=320,
-                                       mode="determinate", maximum=N)
-        progress_bar.pack(side=tk.LEFT, padx=10)
+        # Progress UI (embedded under canvases)
+        progress_frame = tk.Frame(root, relief="sunken", borderwidth=1)
+        progress_frame.grid(row=2, column=0, columnspan=2, sticky="ew", padx=4, pady=2)
+
+        progress_bar = ttk.Progressbar(progress_frame, orient="horizontal", mode="determinate", maximum=N)
+        progress_bar.grid(row=0, column=0, sticky="ew", padx=6, pady=4)
+        progress_frame.grid_columnconfigure(0, weight=1)
+
         progress_label = tk.Label(progress_frame, text=f"0 / {N} (0.0%)")
-        progress_label.pack(side=tk.LEFT, padx=5)
+        progress_label.grid(row=0, column=1, padx=6)
+
         cancel_flag = {'stop': False}
+        cancel_btn = tk.Button(progress_frame, text="Cancel", command=lambda: cancel_flag.update(stop=True))
+        cancel_btn.grid(row=0, column=2, padx=6)
 
-        def _cancel():
-            cancel_flag['stop'] = True
-
-        cancel_btn = tk.Button(progress_frame, text="Cancel", command=_cancel)
-        cancel_btn.pack(side=tk.LEFT, padx=10)
-
-        # Thread-safe queue for progress and result
         q = queue.Queue()
 
         def _read_one(p):
             try:
-
                 return tiff.imread(p)
             except Exception:
-                #from PIL import Image
                 with Image.open(p) as im:
                     return np.array(im)
 
@@ -360,7 +355,7 @@ def visualiser():
 
                 for i, name in enumerate(files[1:], start=2):
                     if cancel_flag['stop']:
-                        q.put(('cancelled', None, None))
+                        q.put(('cancelled',))
                         return
                     arr = _read_one(os.path.join(folder_path, name))
                     if arr.shape != (H, W):
@@ -369,34 +364,38 @@ def visualiser():
                     stack[i - 1] = arr
                     q.put(('progress', i, N))
 
-                # Pad if needed, then reshape to (Y, X, H, W)
                 if N % scan_width != 0:
                     missing = scan_width - (N % scan_width)
                     pad = np.zeros((missing, H, W), dtype=dtype)
                     stack = np.concatenate([stack, pad], axis=0)
                 data = stack.reshape(-1, scan_width, H, W)  # rows auto (ceil)
-                q.put(('done', data, (H, W)))
+                q.put(('done', data))
             except Exception as e:
                 q.put(('error', str(e)))
 
         def pump():
+            nonlocal data_array, circle_center, df_centers
             try:
                 while True:
-                    kind, a, b = q.get_nowait()
+                    msg = q.get_nowait()
+                    kind = msg[0]
                     if kind == 'progress':
-                        i, total = a, b
+                        i, total = msg[1], msg[2]
                         progress_bar['value'] = i
                         progress_label.config(text=f"{i} / {total} ({(i / total) * 100:.1f}%)")
                     elif kind == 'done':
-                        nonlocal data_array, circle_center
-                        data_array = a
-                        H, W = b
-                        circle_center[0], circle_center[1] = W // 2, H // 2
-                        update_pointer_image(data_array.shape[1] // 2, data_array.shape[0] // 2)
+                        data_array = msg[1]
+                        H, W = data_array.shape[2], data_array.shape[3]
+                        circle_center[:] = [W // 2, H // 2]
+                        df_centers[:] = [list(circle_center)]
+                        #update_pointer_image(W // 2, H // 2)
+                        current_scan_xy[:] = [data_array.shape[1] // 2, data_array.shape[0] // 2]
+
+
                         progress_frame.destroy()
-                        messagebox.showinfo("Import Complete",
-                                            f"Imported {N} images → navigator {data_array.shape[:2]}", parent=root)
-                        update_function()
+
+                        update_main_image(trigger_user_function=True)
+                        update_pointer_image(*current_scan_xy)
                         return
                     elif kind == 'cancelled':
                         progress_frame.destroy()
@@ -404,11 +403,11 @@ def visualiser():
                         return
                     elif kind == 'error':
                         progress_frame.destroy()
-                        messagebox.showerror("Load TIFF Series", a, parent=root)
+                        messagebox.showerror("Load TIFF Series", msg[1], parent=root)
                         return
             except queue.Empty:
                 pass
-            root.after(33, pump)  # ~30 Hz UI updates
+            root.after(33, pump)
 
         threading.Thread(target=worker, daemon=True).start()
         pump()
@@ -440,7 +439,7 @@ def visualiser():
             image = image.convert("RGB")
         return image
 
-    def normalize_to_8bit(img, clip=(0.5, 99.5), ignore_zeros=True, use_log=False):#, apply_clahe=False):
+    def normalize_to_8bit(img, clip=(0.5, 99.5), ignore_zeros=True, use_log=False):
         a = np.asarray(img).astype(np.float32)
         mask = np.isfinite(a)
         if ignore_zeros: mask &= (a != 0)
@@ -455,116 +454,103 @@ def visualiser():
             a = np.log1p(a)
         denom = (a.max() - a.min()) or 1.0
         out = ((a - a.min()) / denom * 255).astype(np.uint8)
-        #if apply_clahe:
-        #    try:
-        #        #import cv2;
-        #        out = cv2.createCLAHE(2.0, (8, 8)).apply(out)
-        #    except:  # fallback hist eq
-        #        hist, _ = np.histogram(out, 256, (0, 255));
-        #        cdf = hist.cumsum();
-        #        cdf = (cdf - cdf[cdf > 0].min()) * 255 / (cdf.max() - cdf[cdf > 0].min());
-        #        lut = np.clip(cdf, 0, 255).astype(np.uint8);
-        #        out = lut[out]
+
         return out
 
-    #def update_main_image(trigger_user_function=False):
+    def run_with_spinner(root, title, work_fn, done_cb):
+        win = tk.Toplevel(root)
+        win.title(title)
+        win.transient(root)
+        win.grab_set()
+        lbl = tk.Label(win, text="Working…")
+        lbl.pack(padx=20, pady=10)
+        bar = ttk.Progressbar(win, mode="indeterminate", length=200)
+        bar.pack(padx=20, pady=10)
+        bar.start(20)
+
+        def worker():
+            try:
+                result = work_fn()
+                root.after(0, lambda: finish(result, None))
+            except Exception as e:
+                root.after(0, lambda: finish(None, e))
+
+        def finish(result, error):
+            bar.stop()
+            win.grab_release()
+            win.destroy()
+            if error:
+                messagebox.showerror(title, str(error), parent=root)
+            else:
+                done_cb(result)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def update_main_image(trigger_user_function: bool = False):
         """
-        Updates the main image displayed in the left window.
-        If `trigger_user_function` is True, regenerates the main image using the user-defined function.
-        """
-        #nonlocal main_image_pil
+        Updates the main (navigator) image in the left canvas.
 
-        # Regenerate the main image if requested
-        #if trigger_user_function:
-        #    if data_array is None:
-        #        print("No data array available.")
-        #        return
-        #    function = functions[selected_function.get()]
-        #    # Call the user-defined function to regenerate the main image
-        #    new_main_image = function(data_array, radius_value.get(), tuple(circle_center))
-        #    normalized_main_image = normalize_to_8bit(new_main_image)
-        #    main_image_pil = Image.fromarray(normalized_main_image).convert("RGB")
-
-        #if main_image_pil is None:
-        #    main_canvas.delete("all")
-        #    return
-
-        # Resize the main image to fit the left canvas
-        #resized_main = main_image_pil.resize((1024, 1024), Image.NEAREST)
-        #resized_main = ensure_rgb(resized_main)
-        #resized_main = _resize_preserve_aspect(main_image_pil, 1024)
-        #resized_main = ensure_rgb(resized_main)
-
-        # Draw markers on the resized image
-        #draw = ImageDraw.Draw(resized_main)
-        #scale_factor_x = resized_main.width / main_image_pil.width
-        #scale_factor_y = resized_main.height / main_image_pil.height
-        #for i, (x, y) in enumerate(clicked_positions, start=1):
-        #    # Scale marker positions to match the resized image
-        #    scaled_x = int((x + 0.5) * scale_factor_x)
-        #    scaled_y = int((y + 0.5) * scale_factor_y)
-        #    draw.line((scaled_x - 3, scaled_y, scaled_x + 3, scaled_y), fill="red", width=1)
-        #    draw.line((scaled_x, scaled_y - 3, scaled_x, scaled_y + 3), fill="red", width=1)
-        #    draw.text((scaled_x + 5, scaled_y - 5), str(i), fill="red")
-
-        # Update the main canvas
-        #main_image_tk = ImageTk.PhotoImage(resized_main)
-
-        #image_refs["main_image"] = main_image_tk
-        #main_canvas.create_image(0, 0, anchor=tk.NW, image=main_image_tk)
-
-    def update_main_image(trigger_user_function=False):
-        """
-        Updates the main image displayed in the left window.
-        If `trigger_user_function` is True, regenerates the main image using the user-defined function.
+        If `trigger_user_function` is True, it regenerates the main image using
+        the currently selected analysis function. Otherwise, it just redraws
+        whatever is in `main_image_pil`.
         """
         nonlocal main_image_pil
 
-        # Regenerate the main image if requested
+        # Optionally regenerate from analysis function
         if trigger_user_function:
             if data_array is None:
                 print("No data array available.")
                 return
-            func = functions[selected_function.get()]
-            new_main_image = func(data_array, radius_value.get(), tuple(circle_center))
-            normalized = normalize_to_8bit(new_main_image)
-            main_image_pil = Image.fromarray(normalized).convert("RGB")
+            sel = selected_function.get()
+            print(f"update_main_image(): regenerating via {sel}")
+            try:
+                if sel == "DF":
+                    arr = VDF_multi(data_array, radius_value.get(), df_centers)
+                elif sel == "VADF":
+                    outer_radius = max(radius_value.get() + 1, outer_radius_value.get())
+                    arr = functions[sel]["fn"](data_array,
+                                               radius_value.get(),
+                                               outer_radius,
+                                               tuple(circle_center))
+                else:
+                    arr = functions[sel]["fn"](data_array,
+                                               radius_value.get(),
+                                               tuple(circle_center))
+                normalized = normalize_to_8bit(arr)
+                main_image_pil = Image.fromarray(normalized).convert("RGB")
+                print(f"update_main_image(): new image shape {arr.shape}")
+            except Exception as e:
+                messagebox.showerror("Analysis Error", str(e), parent=root)
+                return
 
         if main_image_pil is None:
             main_canvas.delete("all")
+            print("update_main_image(): no image to draw")
             return
 
-        # --- Aspect-preserving resize (longest side = 1024) ---
-        def _resize_preserve_aspect(img: Image.Image, max_side=1024) -> Image.Image:
-            w, h = img.size
-            if w == 0 or h == 0:
-                return img
-            if w >= h:
-                new_w = max_side
-                new_h = max(1, int(round(h * (max_side / w))))
-            else:
-                new_h = max_side
-                new_w = max(1, int(round(w * (max_side / h))))
-            return img.resize((new_w, new_h), Image.NEAREST)
+        # --- Resize to fit canvas while preserving aspect ---
+        iw0, ih0 = main_image_pil.size
+        cw = max(1, main_canvas.winfo_width())
+        ch = max(1, main_canvas.winfo_height())
 
-        resized_main = _resize_preserve_aspect(main_image_pil, 1024)
+        if iw0 >= ih0:
+            iw = min(cw, 1024)
+            ih = max(1, int(round(ih0 * (iw / iw0))))
+        else:
+            ih = min(ch, 1024)
+            iw = max(1, int(round(iw0 * (ih / ih0))))
+
+        resized_main = main_image_pil.resize((iw, ih), Image.NEAREST)
         resized_main = ensure_rgb(resized_main)
 
-        # --- Center the image on the canvas ---
-        cw = max(1, int(main_canvas.winfo_width()))
-        ch = max(1, int(main_canvas.winfo_height()))
-        iw, ih = resized_main.size
-        x0 = (cw - iw) // 2
-        y0 = (ch - ih) // 2
-        if x0 < 0: x0 = 0
-        if y0 < 0: y0 = 0
+        # --- Center it in canvas ---
+        x0 = max(0, (cw - iw) // 2)
+        y0 = max(0, (ch - ih) // 2)
 
-        # --- Draw markers scaled to the resized image ---
-        orig_w, orig_h = main_image_pil.size
-        sx = (iw / orig_w) if orig_w else 1.0
-        sy = (ih / orig_h) if orig_h else 1.0
-
+        # --- Draw markers ---
         draw = ImageDraw.Draw(resized_main)
+        sx = iw / iw0 if iw0 else 1.0
+        sy = ih / ih0 if ih0 else 1.0
         for i, (x, y) in enumerate(clicked_positions, start=1):
             rx = int(round((x + 0.5) * sx))
             ry = int(round((y + 0.5) * sy))
@@ -572,93 +558,143 @@ def visualiser():
             draw.line((rx, ry - 3, rx, ry + 3), fill="red", width=1)
             draw.text((rx + 5, ry - 5), str(i), fill="red")
 
-        # --- Push to canvas (centered) ---
+        # --- Push to canvas ---
         main_image_tk = ImageTk.PhotoImage(resized_main)
         image_refs["main_image"] = main_image_tk
         main_canvas.delete("all")
         main_canvas.create_image(x0, y0, anchor=tk.NW, image=main_image_tk)
 
+        # Save display geometry for click/motion mapping
         main_canvas.display_geom = {
             "img_w": iw, "img_h": ih,
             "x0": x0, "y0": y0,
-            "orig_w": orig_w, "orig_h": orig_h,
-            "scale_x": (orig_w / iw) if iw else 1.0,
-            "scale_y": (orig_h / ih) if ih else 1.0,
+            "orig_w": iw0, "orig_h": ih0,
+            "scale_x": (iw0 / iw) if iw else 1.0,
+            "scale_y": (ih0 / ih) if ih else 1.0,
         }
+        print("update_main_image(): finished drawing")
 
     def update_pointer_image(x, y):
         """
-        Updates the right window's image based on the pointer position.
-        Displays a semi-transparent circle with the radius set by the user.
+        Update the right (pointer) canvas with the diffraction pattern at (x, y).
+        Draws detector overlays:
+          - DF  : multiple green circles (one per center) or a hint if none.
+          - VADF: two concentric red circles (inner & outer).
+          - BF/ADF/others: single red circle.
         """
-        nonlocal pointer_image_pil, circle_center
+        nonlocal pointer_image_pil
         if data_array is None or main_image_pil is None:
             return
 
-        # Clamp and sync the current scan position
-        Y, X = data_array.shape[0], data_array.shape[1]
+        print("Pointer update:", x, y, "| data_array shape:", data_array.shape)
+
+        # --- Clamp indices and sync global scan position ---
+        Y, X = data_array.shape[:2]
         x = max(0, min(X - 1, int(x)))
         y = max(0, min(Y - 1, int(y)))
-        current_scan_xy[0], current_scan_xy[1] = x, y
+        current_scan_xy[:] = [x, y]
 
-        if 0 <= y < data_array.shape[0] and 0 <= x < data_array.shape[1]:
-            sub_image = data_array[y, x]
-            normalized = normalize_to_8bit(sub_image)
-            pointer_image_pil = Image.fromarray(normalized).convert("RGB")
+        # --- Extract + normalize diffraction pattern ---
+        sub_image = data_array[y, x]
+        normalized = normalize_to_8bit(sub_image)
+        pointer_image_pil = Image.fromarray(normalized).convert("RGB")
 
-            # Resize the pointer image to fit the square canvas
-            resized_pointer = pointer_image_pil.resize((SQUARE_CANVAS_SIZE, SQUARE_CANVAS_SIZE), Image.NEAREST)
+        # --- Scale to display size ---
+        resized = pointer_image_pil.resize((SQUARE_CANVAS_SIZE, SQUARE_CANVAS_SIZE), Image.NEAREST)
+        draw = ImageDraw.Draw(resized, "RGBA")
 
-            # Scale circle_center to the resized image dimensions
-            scale_x = SQUARE_CANVAS_SIZE / pointer_image_pil.width
-            scale_y = SQUARE_CANVAS_SIZE / pointer_image_pil.height
-            upscaled_center_x = int(circle_center[0] * scale_x)
-            upscaled_center_y = int(circle_center[1] * scale_y)
+        # --- Common scaling factors for overlay geometry ---
+        scale_x = SQUARE_CANVAS_SIZE / pointer_image_pil.width
+        scale_y = SQUARE_CANVAS_SIZE / pointer_image_pil.height
 
-            # Draw the semi-transparent circle
-            draw = ImageDraw.Draw(resized_pointer, "RGBA")
-            circle_radius = radius_value.get()
-            draw.ellipse(
-                (upscaled_center_x - circle_radius*scale_x, upscaled_center_y - circle_radius*scale_y,
-                 upscaled_center_x + circle_radius*scale_x, upscaled_center_y + circle_radius*scale_y),
-                outline=(255, 0, 0, 128),  # Semi-transparent red
-                width=3
-            )
-            draw.line((upscaled_center_x - 3, upscaled_center_y, upscaled_center_x + 3, upscaled_center_y), fill="red", width=1)
-            draw.line((upscaled_center_x, upscaled_center_y - 3, upscaled_center_x, upscaled_center_y + 3), fill="red", width=1)
+        sel = selected_function.get()
 
-            pointer_image_tk = ImageTk.PhotoImage(resized_pointer)
-            image_refs["current_sub_image"] = pointer_image_tk
-            pointer_canvas.create_image(0, 0, anchor=tk.NW, image=pointer_image_tk)
+        if sel == "DF":
+            r = int(radius_value.get())
+            if df_centers:
+                for i, (cx, cy) in enumerate(df_centers):
+                    ux, uy = int(cx * scale_x), int(cy * scale_y)
+                    rx, ry = r * scale_x, r * scale_y
+                    draw.ellipse((ux - rx, uy - ry, ux + rx, uy + ry),
+                                 outline=(0, 255, 0, 128), width=2)
+                    draw.line((ux - 3, uy, ux + 3, uy), fill="red", width=1)
+                    draw.line((ux, uy - 3, ux, uy + 3), fill="red", width=1)
+                    draw.text((ux + 5, uy - 5), f"{i + 1}", fill="red")
+            else:
+                # no centers selected → show a small hint
+                draw.text((8, 8), "No DF centers", fill="red")
+
+        elif sel == "VADF":
+            # Two concentric circles: inner (radius_value), outer (outer_radius_value)
+            rin = int(radius_value.get())
+            rout = int(outer_radius_value.get())
+            if rout < rin:
+                rout = rin  # keep sensible ordering visually
+
+            cx, cy = circle_center
+            ux, uy = int(cx * scale_x), int(cy * scale_y)
+            rinx, riny = rin * scale_x, rin * scale_y
+            routx, routy = rout * scale_x, rout * scale_y
+
+            # Inner ring
+            draw.ellipse((ux - rinx, uy - riny, ux + rinx, uy + riny),
+                         outline=(255, 0, 0, 160), width=3)
+            # Outer ring
+            draw.ellipse((ux - routx, uy - routy, ux + routx, uy + routy),
+                         outline=(255, 0, 0, 90), width=3)
+
+            # Center crosshair
+            draw.line((ux - 3, uy, ux + 3, uy), fill="red", width=1)
+            draw.line((ux, uy - 3, ux, uy + 3), fill="red", width=1)
+
+        else:
+            # Default single-circle overlay (BF / ADF / others)
+            r = int(radius_value.get())
+            cx, cy = circle_center
+            ux, uy = int(cx * scale_x), int(cy * scale_y)
+            rx, ry = r * scale_x, r * scale_y
+            draw.ellipse((ux - rx, uy - ry, ux + rx, uy + ry),
+                         outline=(255, 0, 0, 128), width=3)
+            draw.line((ux - 3, uy, ux + 3, uy), fill="red", width=1)
+            draw.line((ux, uy - 3, ux, uy + 3), fill="red", width=1)
+
+        # --- Push to Tkinter canvas ---
+        pointer_image_tk = ImageTk.PhotoImage(resized)
+        image_refs["current_sub_image"] = pointer_image_tk
+        pointer_canvas.delete("all")
+        pointer_canvas.create_image(0, 0, anchor=tk.NW, image=pointer_image_tk)
 
     def on_pointer_click(event):
         """
-        Set the detector center by clicking within the right (pointer) image.
-        Do NOT change which scan (x,y) is displayed here.
+        Handle clicks on the diffraction (right) canvas.
+        - DF mode: left click adds a center, right click removes last (can reach zero).
+        - Other modes: left/right click set the single circle center.
         """
-        nonlocal circle_center, pointer_image_pil
+        nonlocal df_centers, circle_center
         if pointer_image_pil is None:
             return
 
-        dw = SQUARE_CANVAS_SIZE
-        dh = SQUARE_CANVAS_SIZE
+        dw, dh = SQUARE_CANVAS_SIZE, SQUARE_CANVAS_SIZE
         if not (0 <= event.x < dw and 0 <= event.y < dh):
             return
 
+        # Map canvas coords back to original DP coords
         ow, oh = pointer_image_pil.width, pointer_image_pil.height
         cx = int(event.x * (ow / dw))
         cy = int(event.y * (oh / dh))
-        cx = max(0, min(ow - 1, cx))
-        cy = max(0, min(oh - 1, cy))
 
-        circle_center[0], circle_center[1] = cx, cy
+        if selected_function.get() == "DF":
+            if event.num == 1:  # left click → add DF center
+                df_centers.append([cx, cy])
+            elif event.num == 3:  # right click → remove last DF center
+                if df_centers:
+                    df_centers.pop()
 
-        # Redraw the scan position (fallback to center if uninitialized)
-        x = current_scan_xy[0] if current_scan_xy[0] >= 0 else (data_array.shape[1] // 2)
-        y = current_scan_xy[1] if current_scan_xy[1] >= 0 else (data_array.shape[0] // 2)
-        update_pointer_image(x, y)
+        else:
+            # For BF / VADF / etc.: always set a single center
+            circle_center[0], circle_center[1] = cx, cy
 
-        # If update_function depends on center/radius, recompute the main image:
+        update_pointer_image(current_scan_xy[0], current_scan_xy[1])
         update_function()
 
     def on_click(event):
@@ -752,35 +788,36 @@ def visualiser():
             pass
 
     def load_npy_with_progress(path):
-        # This creates a memmap immediately
         mm = np.load(path, mmap_mode='r')
         out = np.empty_like(mm)
         total = mm.size
         chunk = max(1, total // 200)  # ~200 steps
 
-        # UI
-        frame = tk.Frame(root);
-        frame.pack(side=tk.TOP, pady=10)
-        bar = ttk.Progressbar(frame, orient="horizontal", length=300, mode="determinate");
-        bar.pack(side=tk.LEFT, padx=10)
-        lbl = tk.Label(frame, text="0%");
-        lbl.pack(side=tk.LEFT, padx=5)
+        # Embedded progress frame
+        progress_frame = tk.Frame(root, relief="sunken", borderwidth=1)
+        progress_frame.grid(row=2, column=0, columnspan=2, sticky="ew", padx=4, pady=2)
 
-        done = 0
+        bar = ttk.Progressbar(progress_frame, orient="horizontal", mode="determinate", maximum=100)
+        bar.grid(row=0, column=0, sticky="ew", padx=8, pady=4)
+        progress_frame.grid_columnconfigure(0, weight=1)
+
+        lbl = tk.Label(progress_frame, text="0%")
+        lbl.grid(row=0, column=1, padx=8)
+
+        # Actual copy loop
         flat_src = mm.ravel()
         flat_dst = out.ravel()
         for start in range(0, total, chunk):
             end = min(total, start + chunk)
             flat_dst[start:end] = flat_src[start:end]
-            done = end
-            bar["value"] = (done / total) * 100
-            lbl.config(text=f"{bar['value']:.1f}%")
+            pct = (end / total) * 100
+            bar["value"] = pct
+            lbl.config(text=f"{pct:.1f}%")
             root.update_idletasks()
 
-        frame.destroy()
+        progress_frame.destroy()
         return out
 
-    # UPDATED: generic threaded, cancellable progress dialog
     def _load_with_progress(start_fn, title: str):
         """
         start_fn(cancel_flag: dict, q: queue.Queue) should push:
@@ -822,7 +859,7 @@ def visualiser():
 
         def pump():
             def _finish_with_array_and_meta(arr, meta):
-                nonlocal data_array, circle_center
+                nonlocal data_array, circle_center,df_centers
                 arr4d = _coerce_to_4d(arr, root, ask_scan_width)
                 if arr4d is None:
                     bar.stop();
@@ -832,7 +869,9 @@ def visualiser():
                 data_array = arr4d
                 H, W = data_array.shape[2], data_array.shape[3]
                 circle_center[:] = [W // 2, H // 2]
+                df_centers = [list(circle_center)]
                 update_pointer_image(data_array.shape[1] // 2, data_array.shape[0] // 2)
+
                 if isinstance(meta, dict):
                     _metadata_set(meta)
                 bar.stop();
@@ -1003,7 +1042,7 @@ def visualiser():
         raise ValueError(f"Unsupported rsciio return type: {type(obj).__name__}")
 
     def load_blo():
-        nonlocal data_array, circle_center
+        nonlocal data_array, circle_center, df_centers
         path = filedialog.askopenfilename(parent=root, filetypes=[("Blockfile", "*.blo"), ("All files", "*.*")])
         if not path:
             return
@@ -1014,18 +1053,18 @@ def visualiser():
                 return
             try:
                 arr, meta = _read_blo_rsciio_interactive(path, parent=root, lazy=False, endianess="<")
-                if arr is None:  # user cancelled dataset picker
-                    q.put(('error', "Cancelled by user."));
+                if arr is None:
+                    q.put(('error', "Cancelled by user."))
                     return
             except Exception as e:
-                q.put(('error', f"{type(e).__name__}: {e}"));
+                q.put(('error', f"{type(e).__name__}: {e}"))
                 return
             if cancel_flag['stop']:
                 return
             q.put(('done', (arr, meta)))
 
         def _pump_done(payload):
-            nonlocal data_array, circle_center
+            nonlocal data_array, circle_center, df_centers
             arr, meta = payload
             arr4d = _coerce_to_4d(arr, root, ask_scan_width)
             if arr4d is None:
@@ -1033,15 +1072,14 @@ def visualiser():
             data_array = arr4d
             H, W = data_array.shape[2], data_array.shape[3]
             circle_center[:] = [W // 2, H // 2]
-            update_pointer_image(data_array.shape[1] // 2, data_array.shape[0] // 2)
+            df_centers[:] = [list(circle_center)]  # reset DF centers
+            current_scan_xy[:] = [data_array.shape[1] // 2, data_array.shape[0] // 2]
+            update_pointer_image(*current_scan_xy)
             _metadata_set(meta)
             messagebox.showinfo("Load .blo", f"Loaded → navigator {data_array.shape[:2]}", parent=root)
-            update_function()
+            update_main_image(trigger_user_function=True)
 
-        _load_with_progress(
-            lambda cancel_flag, q: start_fn(cancel_flag, q),
-            "Load .blo"
-        )
+        _load_with_progress(lambda cancel_flag, q: start_fn(cancel_flag, q), "Load .blo")
 
     def _extract_array_and_meta(obj):
         """
@@ -1078,17 +1116,19 @@ def visualiser():
         return None, {}
 
     def load_hspy():
-        nonlocal data_array, circle_center
+        nonlocal data_array, circle_center, df_centers
         path = filedialog.askopenfilename(parent=root, filetypes=[("HyperSpy", "*.hspy"), ("All files", "*.*")])
         if not path:
             return
 
         def start_fn(cancel_flag, q):
             q.put(('status', "Reading .hspy…"))
-            if cancel_flag['stop']: return
+            if cancel_flag['stop']:
+                return
             try:
                 obj = rs_hspy.file_reader(path)
-                if cancel_flag['stop']: return
+                if cancel_flag['stop']:
+                    return
                 arr, meta = _extract_array_and_meta(obj)
                 if arr is None:
                     raise ValueError("Could not find ndarray in .hspy file.")
@@ -1096,24 +1136,34 @@ def visualiser():
             except Exception as e:
                 q.put(('error', f"{type(e).__name__}: {e}"))
 
+        def _pump_done(payload):
+            nonlocal data_array, circle_center, df_centers
+            arr, meta = payload
+            arr4d = _coerce_to_4d(arr, root, ask_scan_width)
+            if arr4d is None:
+                return
+            data_array = arr4d
+            H, W = data_array.shape[2], data_array.shape[3]
+            circle_center[:] = [W // 2, H // 2]
+            df_centers[:] = [list(circle_center)]  # reset DF centers
+            current_scan_xy[:] = [data_array.shape[1] // 2, data_array.shape[0] // 2]
+            update_pointer_image(*current_scan_xy)
+            _metadata_set(meta)
+            messagebox.showinfo("Load .hspy", f"Loaded → navigator {data_array.shape[:2]}", parent=root)
+            update_main_image(trigger_user_function=True)
+
         _load_with_progress(start_fn, "Load .hspy")
 
     def load_data():
-        """
-        Loads a .npy file as a 4D data array.
-        Accepts both 4D (Y, X, H, W) and 3D (N, H, W) stacks.
-        If 3D, asks user for scan_width to reshape.
-        """
-        nonlocal data_array, circle_center
+        """Loads a .npy file as a 4D data array."""
+        nonlocal data_array, circle_center, df_centers
         file_path = filedialog.askopenfilename(parent=root, filetypes=[("NumPy Array", "*.npy")])
         if not file_path:
             return
 
         arr = load_npy_with_progress(file_path)
         if arr.ndim == 4:
-            # Already correct
             data_array = arr
-
         elif arr.ndim == 3:
             N, H, W = arr.shape
             guessed_scan_width = int(np.sqrt(N))
@@ -1133,47 +1183,79 @@ def visualiser():
 
             scan_height = N // scan_width
             data_array = arr.reshape(scan_height, scan_width, H, W)
-
         else:
             messagebox.showerror("Load NumPy Array",
                                  f"Expected 3D or 4D array, got shape {arr.shape}",
                                  parent=root)
             return
 
-        # Center integration mask + preview
         H, W = data_array.shape[2], data_array.shape[3]
-        circle_center[0], circle_center[1] = W // 2, H // 2
-        update_pointer_image(data_array.shape[1] // 2, data_array.shape[0] // 2)
+        circle_center[:] = [W // 2, H // 2]
+        current_scan_xy[:] = [data_array.shape[1] // 2, data_array.shape[0] // 2]
+        update_pointer_image(*current_scan_xy)
+        df_centers[:] = [list(circle_center)]  # reset DF centers
 
-        messagebox.showinfo("Import Complete",
-                            f"Loaded array with shape {data_array.shape[:2]} navigator.",
-                            parent=root)
+        #messagebox.showinfo("Import Complete",
+        #                    f"Loaded array with shape {data_array.shape[:2]} navigator.",
+        #                    parent=root)
         update_function()
 
     def update_function(*args):
-        """
-        Updates the main image based on the selected function.
-        Passes both the radius and the circle center to the user function.
-        """
-        nonlocal main_image_pil
-        if data_array is None or selected_function.get() not in functions:
+        """Regenerate and display the main image based on the selected function."""
+        nonlocal main_image_pil, df_centers
+        if data_array is None:
             return
-        function = functions[selected_function.get()]
 
-        if circle_center[0] is None or circle_center[1] is None:
-            H, W = data_array.shape[2], data_array.shape[3]  # diffraction frame (rows, cols)
-            circle_center[0] = W // 2  # x
-            circle_center[1] = H // 2  # y
+        sel = selected_function.get()
+        if sel not in functions:
+            return
 
-        # Call the user function with radius and center
-        main_image = function(data_array, radius_value.get(), tuple(circle_center))
-        main_image_pil = Image.fromarray(normalize_to_8bit(main_image))
-        #update_pointer_image(data_array.shape[1] // 2, data_array.shape[0] // 2)  # args: (x, y)
-        # Redraw pointer view at the last-used scan position (or center if uninitialized)
-        x = current_scan_xy[0] if current_scan_xy[0] >= 0 else (data_array.shape[1] // 2)
-        y = current_scan_xy[1] if current_scan_xy[1] >= 0 else (data_array.shape[0] // 2)
-        update_pointer_image(x, y)
-        update_main_image()
+        print(f"update_function() called, sel = {sel}")
+
+        # ---- Inline "Generating…" bar ----
+        spinner_frame = tk.Frame(root)
+        spinner_frame.grid(row=99, column=0, columnspan=2, pady=6, sticky="ew")
+        lbl = tk.Label(spinner_frame, text="Generating…")
+        lbl.grid(row=0, column=0, padx=8)
+        bar = ttk.Progressbar(spinner_frame, mode="indeterminate", length=220)
+        bar.grid(row=0, column=1, padx=8, sticky="ew")
+        bar.start(15)
+
+        def worker():
+            try:
+                print("Running analysis function...")
+                if sel == "DF":
+                    arr = VDF_multi(data_array, radius_value.get(), df_centers)
+                elif sel == "VADF":
+                    outer_radius = max(radius_value.get() + 1, outer_radius_value.get())
+                    arr = functions[sel]["fn"](data_array,
+                                               radius_value.get(),
+                                               outer_radius,
+                                               tuple(circle_center))
+                else:
+                    arr = functions[sel]["fn"](data_array,
+                                               radius_value.get(),
+                                               tuple(circle_center))
+
+                print(f"Analysis output shape: {arr.shape}")
+                normalized = normalize_to_8bit(arr)
+                result = Image.fromarray(normalized).convert("RGB")
+            except Exception as e:
+                result = e
+            root.after(0, lambda: finish(result))
+
+        def finish(result):
+            nonlocal main_image_pil  # <<< CRUCIAL
+            bar.stop()
+            spinner_frame.destroy()
+            if isinstance(result, Exception):
+                messagebox.showerror("Analysis Error", str(result), parent=root)
+                return
+            main_image_pil = result
+            update_pointer_image(current_scan_xy[0], current_scan_xy[1])
+            update_main_image()
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def export_blo():
         """Prompt for pixel size + path, then write current data_array to .blo."""
@@ -1293,100 +1375,151 @@ def visualiser():
         threading.Thread(target=worker, daemon=True).start()
         pump()
 
-    # UI Layout
-    # Set the desired square canvas size
-    SQUARE_CANVAS_SIZE = 512  # Example size #rescales smaller diffraction to 512 so it is visible
+    def on_function_change(event=None):
+        """
+        Show/hide controls that are specific to the selected function,
+        then recompute the navigator and refresh overlays.
+        """
+        fn = selected_function.get()
+
+        # Only show outer radius controls when VADF is selected
+        if fn == "VADF":
+            outer_radius_label.grid(row=0, column=99, padx=5, pady=5, sticky="w")
+            outer_radius_entry.grid(row=0, column=100, padx=5, pady=5, sticky="w")
+        else:
+            outer_radius_label.grid_forget()
+            outer_radius_entry.grid_forget()
+
+        # Clamp outer >= inner when VADF is active
+        if fn == "VADF":
+            try:
+                rin = int(radius_value.get())
+                rout = int(outer_radius_value.get())
+                if rout < rin:
+                    outer_radius_value.set(rin)
+            except Exception:
+                pass
+
+        update_function()
+
+    # --- UI Layout ---
+    SQUARE_CANVAS_SIZE = 512
+    MIN_CANVAS_SIZE = 256
 
     # Top Frame for Controls
     top_frame = tk.Frame(root)
-    top_frame.pack(side=tk.TOP, fill=tk.X)
+    top_frame.grid(row=0, column=0, columnspan=2, sticky="ew")
+    root.grid_rowconfigure(0, weight=0)
+    root.grid_columnconfigure(0, weight=1)
+    root.grid_columnconfigure(1, weight=1)
 
-    # Load Data Button
-    load_button = tk.Button(top_frame, text="Load Numpy Array", command=load_data)
-    load_button.pack(side=tk.LEFT, padx=5, pady=5)
-
-    #Load Series button
-    load_series_b = tk.Button(top_frame, text="Load .tiff series", command=load_series)
-    load_series_b.pack(side=tk.LEFT, padx=5, pady=5)
-
-    #blo reader
+    # File I/O buttons
+    tk.Button(top_frame, text="Load Numpy Array", command=load_data).pack(side=tk.LEFT, padx=5, pady=5)
+    tk.Button(top_frame, text="Load .tiff series", command=load_series).pack(side=tk.LEFT, padx=5, pady=5)
     tk.Button(top_frame, text="Load .blo", command=load_blo).pack(side=tk.LEFT, padx=5, pady=5)
-    #hspy reader
     tk.Button(top_frame, text="Load .hspy", command=load_hspy).pack(side=tk.LEFT, padx=5, pady=5)
-    #metadata json loading
-    btn_meta_json = tk.Button(top_frame, text="Load metadata (.json)", command=load_metadata_json)
-    btn_meta_json.pack(side=tk.LEFT, padx=5, pady=5)
-    export_blo_btn = tk.Button(top_frame, text="Export .blo", command=export_blo)
-    export_blo_btn.pack(side=tk.LEFT, padx=5, pady=5)
+    tk.Button(top_frame, text="Load metadata (.json)", command=load_metadata_json).pack(side=tk.LEFT, padx=5, pady=5)
+    tk.Button(top_frame, text="Export .blo", command=export_blo).pack(side=tk.LEFT, padx=5, pady=5)
+    tk.Button(top_frame, text="Export .tiff series", command=export_tiff_folder).pack(side=tk.LEFT, padx=5, pady=5)
+    tk.Button(top_frame, text="Save Images", command=save_images).pack(side=tk.LEFT, padx=5, pady=5)
 
-    export_tif_btn = tk.Button(top_frame, text="Export .tiff series", command=export_tiff_folder)
-    export_tif_btn.pack(side=tk.LEFT, padx=5, pady=5)
-    #Save images button
-    save_images = tk.Button(top_frame, text="Save Images", command=save_images)
-    save_images.pack(side=tk.LEFT, padx=5, pady=5)
-
+    # Detector radius
     radius_label = tk.Label(top_frame, text="Detector Radius (px):")
     radius_label.pack(side=tk.LEFT, padx=5, pady=5)
 
     radius_entry = tk.Entry(top_frame, textvariable=radius_value, width=5)
     radius_entry.pack(side=tk.LEFT, padx=5, pady=5)
-
     radius_entry.bind("<Return>", lambda e: (clamp_radius(), "break"))
     radius_entry.bind("<FocusOut>", clamp_radius)
-    # Function Dropdown Menu
-    function_dropdown = ttk.Combobox(top_frame, textvariable=selected_function, values=list(functions.keys()),
-                                     state="readonly")
+
+    # Function dropdown
+    function_dropdown = ttk.Combobox(
+        top_frame,
+        textvariable=selected_function,
+        values=list(functions.keys()),
+        state="readonly"
+    )
     function_dropdown.pack(side=tk.LEFT, padx=5, pady=5)
-    function_dropdown.bind("<<ComboboxSelected>>", update_function)
+    function_dropdown.bind("<<ComboboxSelected>>", on_function_change)
 
-    # Main Frame for Canvases
+    # Outer radius (VADF only, shown dynamically)
+    outer_radius_value = tk.IntVar(value=50)
+    outer_radius_label = tk.Label(top_frame, text="Outer Radius (px):")
+    outer_radius_entry = tk.Entry(top_frame, textvariable=outer_radius_value, width=5)
+
+    # --- Main Frame with 2 panels ---
     main_frame = tk.Frame(root)
-    main_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+    main_frame.grid(row=1, column=0, columnspan=2, sticky="nsew")
+    root.grid_rowconfigure(1, weight=1)
 
-    # ---- Left panel: Navigator + dynamic label ----
+    # Left panel (navigator)
     left_panel = tk.Frame(main_frame)
-    left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    left_panel.grid(row=0, column=0, sticky="nsew")
+    main_frame.grid_columnconfigure(0, weight=3)  # left takes more width
+    main_frame.grid_rowconfigure(0, weight=1)
 
-    main_canvas = tk.Canvas(left_panel, width=1024, height=1024, bg="white")
-    main_canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+    main_canvas = tk.Canvas(left_panel, bg="white")
+    main_canvas.pack(fill="both", expand=True)
     main_canvas.bind("<Button-1>", on_click)
     main_canvas.bind("<Motion>", _on_mouse_motion)
     main_canvas.bind("<Button-2>", toggle_mouse_motion)
 
     left_status_var = tk.StringVar(value="Mouse: (—, —)  |  motion: on")
-    main_label = tk.Label(left_panel, textvariable=left_status_var, justify="center")
-    main_label.pack(side=tk.TOP, pady=5)
+    main_label = tk.Label(left_panel, textvariable=left_status_var)
+    main_label.pack(fill="x")
 
-    # ---- Right panel: Pointer + dynamic label ----
+    # Right panel (diffraction + metadata)
     right_panel = tk.Frame(main_frame)
-    right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+    right_panel.grid(row=0, column=1, sticky="nsew")
+    main_frame.grid_columnconfigure(1, weight=2)  # right panel narrower
 
-    pointer_canvas = tk.Canvas(right_panel, width=SQUARE_CANVAS_SIZE, height=SQUARE_CANVAS_SIZE, bg="white")
-    pointer_canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+    # Diffraction canvas stays square
+    pointer_canvas = tk.Canvas(right_panel, bg="white",
+                               width=SQUARE_CANVAS_SIZE, height=SQUARE_CANVAS_SIZE)
+    pointer_canvas.pack(padx=5, pady=5)
+
+    def _keep_square(event):
+        side = max(MIN_CANVAS_SIZE, min(event.width, event.height))
+        if pointer_canvas.winfo_width() != side or pointer_canvas.winfo_height() != side:
+            pointer_canvas.config(width=side, height=side)
+        _refresh_pointer()  # redraw after resize
+
+    pointer_canvas.bind("<Configure>", _keep_square)
     pointer_canvas.bind("<Button-1>", on_pointer_click)
+    pointer_canvas.bind("<Button-3>", on_pointer_click)
 
     right_status_var = tk.StringVar(value="Scan: (—, —)  |  center: (—, —)")
-    pointer_label = tk.Label(right_panel, textvariable=right_status_var, justify="center")
-    pointer_label.pack(side=tk.TOP, pady=5)
+    pointer_label = tk.Label(right_panel, textvariable=right_status_var)
+    pointer_label.pack(fill="x")
 
-    # ---- Metadata panel (Treeview) under the right image ----
+    # Metadata Treeview fills remaining space
     meta_frame = tk.Frame(right_panel)
-    meta_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=(0, 5))
+    meta_frame.pack(fill="both", expand=True, padx=5, pady=(0, 5))
 
     cols = ("Value",)
-    metadata_tree = ttk.Treeview(meta_frame, columns=cols, show="tree headings", height=12)
+    metadata_tree = ttk.Treeview(meta_frame, columns=cols, show="tree headings")
     metadata_tree.heading("#0", text="Key")
     metadata_tree.heading("Value", text="Value")
 
     xs = ttk.Scrollbar(meta_frame, orient="horizontal", command=metadata_tree.xview)
-    metadata_tree.configure(xscrollcommand=xs.set)
-
     ys = ttk.Scrollbar(meta_frame, orient="vertical", command=metadata_tree.yview)
-    metadata_tree.configure(yscrollcommand=ys.set)
+    metadata_tree.configure(xscrollcommand=xs.set, yscrollcommand=ys.set)
 
-    metadata_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-    ys.pack(side=tk.RIGHT, fill=tk.Y)
+    metadata_tree.pack(side="left", fill="both", expand=True)
+    ys.pack(side="right", fill="y")
+    xs.pack(side="bottom", fill="x")
 
+    # --- Resize-aware redraw bindings ---
+    def _refresh_main(event=None):
+        if main_image_pil is not None:
+            update_main_image()
+
+    def _refresh_pointer(event=None):
+        if pointer_image_pil is not None:
+            update_pointer_image(current_scan_xy[0], current_scan_xy[1])
+
+    main_canvas.bind("<Configure>", _refresh_main)
+    pointer_canvas.bind("<Configure>", _refresh_pointer)
     # Start the Tkinter main loop
     root.mainloop()
 
