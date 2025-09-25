@@ -25,45 +25,38 @@ def VBF(image_array,radius,center):
         dataset_shape[0], dataset_shape[1]))  # reshapes array to match image dimensions
     return VBF_intensity_array
 
+def VDF_multi(image_array, radius, centers):
+    dataset_shape = image_array.shape[:2]
+    cam_shape = image_array[0, 0].shape
+    result = np.zeros(dataset_shape, dtype=np.float32)
 
-def VADF(image_array,inner_radius,center):
-    camera_data_shape = image_array[0][0].shape  # shape of first image to get image dimensions
-    dataset_shape = image_array.shape[0], image_array.shape[1]  # scanned region shape
-    ADF_intensity_list = []  # empty list to take virtual bright field image sigals
-    integration_mask_inner = create_circular_mask(camera_data_shape[0], camera_data_shape[1],mask_center_coordinates=center, mask_radius=inner_radius)
-    for row in image_array:  # iterates through array rows
-        for pixel in row:  # in each row iterates through pixels
-            inner_intensity = np.sum(pixel[integration_mask_inner])
-            outer_intensity = np.sum(pixel)#[integration_mask_outer])
-            ADF_intensity_list.append((outer_intensity - inner_intensity))  # adds to the list
+    # Precompute masks
+    masks = [create_circular_mask(cam_shape[0], cam_shape[1],
+                                  mask_center_coordinates=c, mask_radius=radius)
+             for c in centers]
 
-    VADF_intensity_array = np.asarray(ADF_intensity_list)  # converts list to array
-    VADF_intensity_array = np.reshape(VADF_intensity_array, (
-        dataset_shape[0], dataset_shape[1]))  # reshapes array to match image dimensions
-    return VADF_intensity_array
+    for iy, row in enumerate(image_array):
+        for ix, pixel in enumerate(row):
+            val = 0.0
+            for m in masks:
+                val += np.sum(pixel[m])
+            result[iy, ix] = val
+    return result
 
-def VADF_new(image_array,inner_radius,outer_radius,center):
-    camera_data_shape = image_array[0][0].shape  # shape of first image to get image dimensions
-    dataset_shape = image_array.shape[0], image_array.shape[1]  # scanned region shape
-    ADF_intensity_list = []  # empty list to take virtual bright field image sigals
-    integration_mask_inner = create_circular_mask(camera_data_shape[0], camera_data_shape[1],mask_center_coordinates=center, mask_radius=inner_radius)
-    integration_mask_outer = create_circular_mask(camera_data_shape[0], camera_data_shape[1], mask_center_coordinates=center,
-                                            mask_radius=outer_radius)
-    for row in image_array:  # iterates through array rows
-        for pixel in row:  # in each row iterates through pixels
-            inner_intensity = np.sum(pixel[integration_mask_inner])
-            outer_intensity = np.sum(pixel[integration_mask_outer])
-            #ADF_intensity = outer_intensity - inner_intensity  # measures the intensity in the masked image
-            ADF_intensity_list.append((outer_intensity - inner_intensity))  # adds to the list
 
-    VADF_intensity_array = np.asarray(ADF_intensity_list)  # converts list to array
-    VADF_intensity_array = np.reshape(VADF_intensity_array, (
-        dataset_shape[0], dataset_shape[1]))  # reshapes array to match image dimensions
-    return VADF_intensity_array
 
-# analysis_functions.py
+def VADF(array4d, r_in, r_out, center):
+    H, W = array4d.shape[2:]
+    Y, X = np.meshgrid(np.arange(H), np.arange(W), indexing="ij")
+    cx, cy = center
+    rr = np.sqrt((X - cx)**2 + (Y - cy)**2)
 
-import numpy as np
+    mask_outer = (rr < r_out)
+    mask_inner = (rr < r_in)
+    annulus_mask = mask_outer ^ mask_inner  # pixels in [r_in, r_out)
+
+    # Collapse DP axes into 1D, mask once, sum in vectorized manner
+    return array4d[:, :, annulus_mask].sum(axis=-1)
 
 def cross_correlation_map(
     array4d: np.ndarray,
@@ -151,19 +144,3 @@ def cross_correlation_map(
     disp = (disp - lo) / (hi - lo)
     return (disp * 255.0).astype(np.uint8)
 
-
-
-def VDF(image_array,radius,center): #this is the same as the VBF function for now...
-    camera_data_shape = image_array[0][0].shape  # shape of first image to get image dimensions
-    dataset_shape = image_array.shape[0], image_array.shape[1]  # scanned region shape
-    DF_intensity_list = []  # empty list to take virtual bright field image sigals
-    integration_mask = create_circular_mask(camera_data_shape[0], camera_data_shape[1],mask_center_coordinates=center ,mask_radius=radius)
-    for row in image_array:  # iterates through array rows
-        for pixel in row:  # in each row iterates through pixels
-            DF_intensity = np.sum(pixel[integration_mask])
-            DF_intensity_list.append(DF_intensity)  # adds to the list
-
-    DF_intensity_array = np.asarray(DF_intensity_list)  # converts list to array
-    DF_intensity_array = np.reshape(DF_intensity_array, (
-        dataset_shape[0], dataset_shape[1]))  # reshapes array to match image dimensions
-    return DF_intensity_array
