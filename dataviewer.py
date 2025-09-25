@@ -3,7 +3,7 @@ from tkinter import filedialog, simpledialog, messagebox, ttk
 from natsort import natsorted
 import rsciio.blockfile as rs_blo
 import rsciio.hspy      as rs_hspy
-from PIL import Image, ImageTk, ImageDraw
+from PIL import Image, ImageTk, ImageDraw,ImageFont
 import os,inspect
 from analysis_functions import *
 import tifffile as tiff
@@ -551,12 +551,13 @@ def visualiser():
         draw = ImageDraw.Draw(resized_main)
         sx = iw / iw0 if iw0 else 1.0
         sy = ih / ih0 if ih0 else 1.0
+        ImageDraw.ImageDraw.font = ImageFont.truetype("arial.ttf")
         for i, (x, y) in enumerate(clicked_positions, start=1):
             rx = int(round((x + 0.5) * sx))
             ry = int(round((y + 0.5) * sy))
             draw.line((rx - 3, ry, rx + 3, ry), fill="red", width=1)
             draw.line((rx, ry - 3, rx, ry + 3), fill="red", width=1)
-            draw.text((rx + 5, ry - 5), str(i), fill="red")
+            draw.text((rx + 5, ry - 5), str(i), fill="red",font_size=28)
 
         # --- Push to canvas ---
         main_image_tk = ImageTk.PhotoImage(resized_main)
@@ -572,7 +573,31 @@ def visualiser():
             "scale_x": (iw0 / iw) if iw else 1.0,
             "scale_y": (ih0 / ih) if ih else 1.0,
         }
-        print("update_main_image(): finished drawing")
+        #print("update_main_image(): finished drawing")
+
+    def remove_last_marker():
+        """
+        Removes the last clicked marker from the navigator and refreshes the view.
+        Also ensures it won't be exported in images/positions.
+        """
+        if not clicked_positions:
+            messagebox.showinfo("Remove Marker", "No markers to remove.", parent=root)
+            return
+
+        # Remove last position
+        removed = clicked_positions.pop()
+        print(f"Removed marker at {removed}")
+
+        # Redraw the main image without that marker
+        update_main_image()
+
+    def clear_all_markers():
+        "Remove all "
+        if not clicked_positions:
+            messagebox.showinfo("Clear all markers", "No markers to remove.", parent=root)
+            return
+        clicked_positions.clear()
+        update_main_image()
 
     def update_pointer_image(x, y):
         """
@@ -586,7 +611,7 @@ def visualiser():
         if data_array is None or main_image_pil is None:
             return
 
-        print("Pointer update:", x, y, "| data_array shape:", data_array.shape)
+        #print("Pointer update:", x, y, "| data_array shape:", data_array.shape)
 
         # --- Clamp indices and sync global scan position ---
         Y, X = data_array.shape[:2]
@@ -734,7 +759,7 @@ def visualiser():
         global mouse_motion_enabled
         mouse_motion_enabled = not mouse_motion_enabled
         state = "on" if mouse_motion_enabled else "off"
-        print(f"Mouse motion functionality is now {state}.")
+        #print(f"Mouse motion functionality is now {state}.")
         try:
             # keep last coords if any; just reflect state
             txt = left_status_var.get()
@@ -1237,7 +1262,7 @@ def visualiser():
                                                radius_value.get(),
                                                tuple(circle_center))
 
-                print(f"Analysis output shape: {arr.shape}")
+                #print(f"Analysis output shape: {arr.shape}")
                 normalized = normalize_to_8bit(arr)
                 result = Image.fromarray(normalized).convert("RGB")
             except Exception as e:
@@ -1384,11 +1409,11 @@ def visualiser():
 
         # Only show outer radius controls when VADF is selected
         if fn == "VADF":
-            outer_radius_label.grid(row=0, column=99, padx=5, pady=5, sticky="w")
-            outer_radius_entry.grid(row=0, column=100, padx=5, pady=5, sticky="w")
+            outer_radius_label.pack(side=tk.LEFT, padx=5, pady=5)
+            outer_radius_entry.pack(side=tk.LEFT, padx=5, pady=5)
         else:
-            outer_radius_label.grid_forget()
-            outer_radius_entry.grid_forget()
+            outer_radius_label.pack_forget()
+            outer_radius_entry.pack_forget()
 
         # Clamp outer >= inner when VADF is active
         if fn == "VADF":
@@ -1413,6 +1438,8 @@ def visualiser():
     root.grid_columnconfigure(0, weight=1)
     root.grid_columnconfigure(1, weight=1)
 
+
+
     # File I/O buttons
     tk.Button(top_frame, text="Load Numpy Array", command=load_data).pack(side=tk.LEFT, padx=5, pady=5)
     tk.Button(top_frame, text="Load .tiff series", command=load_series).pack(side=tk.LEFT, padx=5, pady=5)
@@ -1422,6 +1449,10 @@ def visualiser():
     tk.Button(top_frame, text="Export .blo", command=export_blo).pack(side=tk.LEFT, padx=5, pady=5)
     tk.Button(top_frame, text="Export .tiff series", command=export_tiff_folder).pack(side=tk.LEFT, padx=5, pady=5)
     tk.Button(top_frame, text="Save Images", command=save_images).pack(side=tk.LEFT, padx=5, pady=5)
+
+    tk.Button(top_frame, text="Remove Last Marker", command=remove_last_marker).pack(side=tk.LEFT, padx=5, pady=5)
+    tk.Button(top_frame, text="Remove All Markers", command=clear_all_markers).pack(side=tk.LEFT, padx=5, pady=5)
+
 
     # Detector radius
     radius_label = tk.Label(top_frame, text="Detector Radius (px):")
