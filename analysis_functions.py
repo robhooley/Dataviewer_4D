@@ -142,6 +142,6 @@ def cross_correlation_map(
 
     disp = np.clip(disp, lo, hi)
     disp = (disp - lo) / (hi - lo)
-    #test
+    #testing
     return (disp * 255.0).astype(np.uint8)
 
