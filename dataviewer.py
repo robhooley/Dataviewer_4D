@@ -133,9 +133,10 @@ def _resize_preserve_aspect(img_pil, max_side=1024):
 
 
 
-def visualiser():
+def visualiser(SerialED_chunk = None):
     """
     Creates a Tkinter application for visualising a 4D STEM array with import, export and saving functionality.
+    If SerialED_chunk is not None, use dataviewer in a modified way, viewing the SerialED_chunk dataset
     """
     root = tk.Tk()
     root.title("4D Array Visualiser")
@@ -579,6 +580,39 @@ def visualiser():
 
         resized_main = main_image_pil.resize((iw, ih), Image.NEAREST)
         resized_main = ensure_rgb(resized_main)
+
+        # --- draw masks id SerialED mode is used
+        if SerialED_chunk is not None:
+            def apply_mask_rgba(base_rgba: Image.Image,
+                                mask_bool: np.ndarray,
+                                color, alpha) -> Image.Image:
+                # Apply a semi-transparent colored mask on top of an existing RGBA PIL image.
+
+                # Convert mask to uint8 for use as PIL mask
+                mask_uint8 = (mask_bool.astype(np.uint8) * 255)
+                mask_img = Image.fromarray(mask_uint8, mode="L")
+                mask_img = mask_img.resize(base_rgba.size, Image.NEAREST)
+
+                w, h = base_rgba.size
+
+                # Overlay initially fully transparent
+                overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+
+                # Colored patch (solid color with alpha)
+                colored = Image.new("RGBA", (w, h), (*color, int(alpha)))
+
+                # Put colored region into overlay using mask_img
+                overlay = Image.composite(colored, overlay, mask_img)
+
+                # Blend overlay onto base
+                return Image.alpha_composite(base_rgba, overlay)
+
+            # apply 3 masks
+            base = resized_main.convert("RGBA") # base image
+            base = apply_mask_rgba(base, SED_VBF_mask, color=(255, 0, 0), alpha=int(SED_VBF_opacity.get() * 255)) #1st mask
+            base = apply_mask_rgba(base, SED_VADF_mask, color=(0, 255, 0), alpha=int(SED_VADF_opacity.get() * 255)) #2nd mask
+            base = apply_mask_rgba(base, SED_radial_mask, color=(0, 0, 255), alpha=int(SED_radial_opacity.get() * 255)) #3rd mask
+            resized_main = base.convert("RGB")
 
         # --- Center it in canvas ---
         x0 = max(0, (cw - iw) // 2)
@@ -1489,11 +1523,16 @@ def visualiser():
 
 
     # File I/O buttons
-    tk.Button(top_frame, text="Load Numpy Array", command=load_data).pack(side=tk.LEFT, padx=5, pady=5)
-    tk.Button(top_frame, text="Load .tiff series", command=load_series).pack(side=tk.LEFT, padx=5, pady=5)
-    tk.Button(top_frame, text="Load .blo", command=load_blo).pack(side=tk.LEFT, padx=5, pady=5)
-    tk.Button(top_frame, text="Load .hspy", command=load_hspy).pack(side=tk.LEFT, padx=5, pady=5)
-    tk.Button(top_frame, text="Load metadata (.json)", command=load_metadata_json).pack(side=tk.LEFT, padx=5, pady=5)
+    button1 = tk.Button(top_frame, text="Load Numpy Array", command=load_data)
+    button2 = tk.Button(top_frame, text="Load .tiff series", command=load_series)
+    button3 = tk.Button(top_frame, text="Load .blo", command=load_blo)
+    button4 = tk.Button(top_frame, text="Load .hspy", command=load_hspy)
+    button5 = tk.Button(top_frame, text="Load metadata (.json)", command=load_metadata_json)
+    button1.pack(side=tk.LEFT, padx=5, pady=5)
+    button2.pack(side=tk.LEFT, padx=5, pady=5)
+    button3.pack(side=tk.LEFT, padx=5, pady=5)
+    button4.pack(side=tk.LEFT, padx=5, pady=5)
+    button5.pack(side=tk.LEFT, padx=5, pady=5)
     tk.Button(top_frame, text="Export .blo", command=export_blo).pack(side=tk.LEFT, padx=5, pady=5)
     tk.Button(top_frame, text="Export .tiff series", command=export_tiff_folder).pack(side=tk.LEFT, padx=5, pady=5)
     tk.Button(top_frame, text="Save Images", command=save_images).pack(side=tk.LEFT, padx=5, pady=5)
@@ -1607,22 +1646,129 @@ def visualiser():
     pointer_label = tk.Label(right_panel, textvariable=right_status_var)
     pointer_label.pack(fill="x")
 
-    # Metadata Treeview fills remaining space
-    meta_frame = tk.Frame(right_panel)
-    meta_frame.pack(fill="both", expand=True, padx=5, pady=(0, 5))
+    if SerialED_chunk is None: # add either metadata view or special options for SerialED
+        # Metadata Treeview fills remaining space
+        meta_frame = tk.Frame(right_panel)
+        meta_frame.pack(fill="both", expand=True, padx=5, pady=(0, 5))
 
-    cols = ("Value",)
-    metadata_tree = ttk.Treeview(meta_frame, columns=cols, show="tree headings")
-    metadata_tree.heading("#0", text="Key")
-    metadata_tree.heading("Value", text="Value")
+        cols = ("Value",)
+        metadata_tree = ttk.Treeview(meta_frame, columns=cols, show="tree headings")
+        metadata_tree.heading("#0", text="Key")
+        metadata_tree.heading("Value", text="Value")
 
-    xs = ttk.Scrollbar(meta_frame, orient="horizontal", command=metadata_tree.xview)
-    ys = ttk.Scrollbar(meta_frame, orient="vertical", command=metadata_tree.yview)
-    metadata_tree.configure(xscrollcommand=xs.set, yscrollcommand=ys.set)
+        xs = ttk.Scrollbar(meta_frame, orient="horizontal", command=metadata_tree.xview)
+        ys = ttk.Scrollbar(meta_frame, orient="vertical", command=metadata_tree.yview)
+        metadata_tree.configure(xscrollcommand=xs.set, yscrollcommand=ys.set)
 
-    metadata_tree.pack(side="left", fill="both", expand=True)
-    ys.pack(side="right", fill="y")
-    xs.pack(side="bottom", fill="x")
+        metadata_tree.pack(side="left", fill="both", expand=True)
+        ys.pack(side="right", fill="y")
+        xs.pack(side="bottom", fill="x")
+    else:
+        # add handling functions
+        def SED_on_mask_change(event):
+            update_main_image()
+
+        def SED_on_threshold_change(ID, value):
+            nonlocal SerialED_chunk, SED_VBF_mask, SED_VADF_mask, SED_radial_mask
+            SerialED_chunk.mask = np.ones((SerialED_chunk.scan_width,
+                                           SerialED_chunk.scan_width), dtype=bool)  # clear mask
+
+            if ID == 'VBF':
+                SerialED_chunk.filter_with_VBF(SED_VBF_threshold.get())  # calculate VBF mask
+                SED_VBF_mask = np.logical_not(SerialED_chunk.mask)  # memorize VBF mask
+
+            elif ID == 'VADF':
+                SerialED_chunk.filter_with_VADF(SED_VADF_threshold.get())  # calculate VADF mask
+                SED_VADF_mask = np.logical_not(SerialED_chunk.mask)  # memorize VBF mask
+
+            elif ID == 'radial':
+                SerialED_chunk.filter_with_radialI(SED_radial_threshold.get())  # calculate radialI mask TODO make filter_with_radialI
+                SED_radial_mask = np.logical_not(SerialED_chunk.mask)  # memorize VBF mask
+
+            update_main_image()
+
+        # disable all 5 load buttons
+        for button in [button1, button2, button3, button4, button5]:
+            button.config(state='disabled')
+
+        # declare variables, all floats from 0 to 1
+        SED_VBF_threshold = tk.DoubleVar(value=0.1)
+        SED_VADF_threshold = tk.DoubleVar(value=0.1)
+        SED_radial_threshold = tk.DoubleVar(value=0.9)
+        SED_VBF_opacity = tk.DoubleVar(value=0.5)
+        SED_VADF_opacity = tk.DoubleVar(value=0.5)
+        SED_radial_opacity = tk.DoubleVar(value=0.5)
+
+        # calculate initial masks
+        SerialED_chunk.mask = np.ones((SerialED_chunk.scan_width,
+                                       SerialED_chunk.scan_width), dtype=bool)  # clear mask if not already
+        SerialED_chunk.filter_with_VBF(SED_VBF_threshold.get())  # calculate VBF mask
+        SED_VBF_mask = np.logical_not(SerialED_chunk.mask)  # memorize VBF mask
+        SerialED_chunk.mask = np.ones((SerialED_chunk.scan_width,
+                                       SerialED_chunk.scan_width), dtype=bool)
+        SerialED_chunk.filter_with_VADF(SED_VADF_threshold.get())  # calculate VADF mask
+        SED_VADF_mask = np.logical_not(SerialED_chunk.mask)  # memorize VADF mask
+        SED_radial_mask = SerialED_chunk.mask #TODO calculate radial intensity mask
+
+        #testing
+        print(f'VBF mask: {np.average(SED_VBF_mask)}')
+        print(f'VADF mask: {np.average(SED_VADF_mask)}')
+
+        # instead of metadata frame, create frame with SerialED controls
+        SerialED_frame = tk.Frame(right_panel)
+        SerialED_frame.pack(fill="both", expand=True, padx=5, pady=(0, 5))
+
+        # three panels, each with a slider and entry box
+        SED_frame1 = tk.Frame(SerialED_frame,highlightthickness=1,
+                               highlightbackground="black",highlightcolor="black")
+        SED_frame1.grid(row=0, column=0, sticky="w", pady=(10, 0), padx=(0, 20))
+        SED_frame2 = tk.Frame(SerialED_frame,highlightthickness=1,
+                               highlightbackground="black",highlightcolor="black")
+        SED_frame2.grid(row=0, column=1, sticky="w", pady=(10, 0), padx=(0, 20))
+        SED_frame3 = tk.Frame(SerialED_frame,highlightthickness=1,
+                               highlightbackground="black",highlightcolor="black")
+        SED_frame3.grid(row=0, column=2, sticky="w", pady=(10, 0))
+
+        def add_SED_widgets(parent, text, ent_init):
+            ttk.Label(parent, text=text).pack(anchor="n")
+            scale = tk.Scale(parent, from_=0.0, to=1.0,resolution=0.01, orient="horizontal")
+            scale.set(0.5)
+            scale.pack(fill="x")
+            entry_panel = tk.Frame(parent)
+            entry_panel.pack(fill="x")
+            ttk.Label(entry_panel, text='mask opacity:').pack(side="left")
+            ent = ttk.Entry(entry_panel)
+            ent.insert(0, ent_init)
+            ent.pack(side="left", fill="x", expand=True)
+
+            return scale, ent
+
+        # create labeled sliders and entry boxes
+        VBF_mask_slider, VBF_mask_ent = add_SED_widgets(SED_frame1, "Sample thickness mask", SED_VBF_opacity.get())
+        VBF_mask_slider.configure(variable=SED_VBF_threshold, command=lambda v: SED_on_threshold_change("VBF", v))
+        VBF_mask_ent.configure(textvariable=SED_VBF_opacity)
+
+        VADF_mask_slider, VADF_mask_ent = add_SED_widgets(SED_frame2, "Direct beam mask", SED_VADF_opacity.get())
+        VADF_mask_slider.configure(variable=SED_VADF_threshold, command=lambda v: SED_on_threshold_change("VADF", v))
+        VADF_mask_ent.configure(textvariable=SED_VADF_opacity)
+
+        radial_mask_slider, radial_mask_ent = add_SED_widgets(SED_frame3, "Amorphous signal mask", SED_radial_opacity.get())
+        radial_mask_slider.configure(variable=SED_radial_threshold, command=lambda v: SED_on_threshold_change("radial", v))
+        radial_mask_ent.configure(textvariable=SED_radial_opacity)
+
+        # bind entry boxes
+        for ent in [VBF_mask_ent,VADF_mask_ent,radial_mask_ent]:
+            ent.bind("<Return>", lambda e: (SED_on_mask_change(e), "break"))
+            ent.bind("<FocusOut>", lambda e: SED_on_mask_change(e))
+
+        # load SerialED_chunk dataset (simulating load_data())
+        data_array = SerialED_chunk.image_array
+        H, W = data_array.shape[2], data_array.shape[3]
+        circle_center[:] = [W // 2, H // 2]
+        current_scan_xy[:] = [data_array.shape[1] // 2, data_array.shape[0] // 2]
+        update_pointer_image(*current_scan_xy)
+        df_centers[:] = [list(circle_center)]  # reset DF centers
+        update_function()
 
     # --- Resize-aware redraw bindings ---
     def _refresh_main(event=None):
@@ -1640,4 +1786,13 @@ def visualiser():
 
 #visualiser()
 if __name__ == "__main__":
-    visualiser()
+    # testing
+    import SerialED_chunk
+    import basics as b
+    image_array = b.open_tiff_series(directory="C:\\Users\\daniel.stasko\\Documents\\Dan_coding\\test_datasets\\serialED\\KGW powder-4D STEM 1-50854\\CameraImageSeries")
+    dataset = SerialED_chunk.SerialED_chunk(image_array, metadata={})
+    dataset.metadata['e_current'] = 10e-12
+    dataset.metadata['dwell_time'] = 20e-3
+    visualiser(SerialED_chunk=dataset)
+
+    # visualiser(SerialED_chunk=True)
