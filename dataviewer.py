@@ -10,6 +10,7 @@ import tifffile as tiff
 import threading,queue
 import numpy as np
 import json
+import easygui as g
 
 # Global variable to control mouse motion functionality
 mouse_motion_enabled = True  # Initially enabled
@@ -133,10 +134,10 @@ def _resize_preserve_aspect(img_pil, max_side=1024):
 
 
 
-def visualiser(SerialED_chunk = None):
+def visualiser(SerialED_info = None, SerialED_chunk = None):
     """
     Creates a Tkinter application for visualising a 4D STEM array with import, export and saving functionality.
-    If SerialED_chunk is not None, use dataviewer in a modified way, viewing the SerialED_chunk dataset
+    If SerialED_mode, use dataviewer in a modified way, viewing the SerialED_chunk dataset
     """
     root = tk.Tk()
     root.title("4D Array Visualiser")
@@ -1646,7 +1647,9 @@ def visualiser(SerialED_chunk = None):
     pointer_label = tk.Label(right_panel, textvariable=right_status_var)
     pointer_label.pack(fill="x")
 
-    if SerialED_chunk is None: # add either metadata view or special options for SerialED
+    # add either metadata view or special options for SerialED
+    if SerialED_info is None: # normal mode
+
         # Metadata Treeview fills remaining space
         meta_frame = tk.Frame(right_panel)
         meta_frame.pack(fill="both", expand=True, padx=5, pady=(0, 5))
@@ -1663,7 +1666,9 @@ def visualiser(SerialED_chunk = None):
         metadata_tree.pack(side="left", fill="both", expand=True)
         ys.pack(side="right", fill="y")
         xs.pack(side="bottom", fill="x")
-    else:
+
+    else: # SerialED mode
+
         # add handling functions
         def SED_on_mask_change(event):
             update_main_image()
@@ -1687,14 +1692,35 @@ def visualiser(SerialED_chunk = None):
 
             update_main_image()
 
+        def SED_finish():
+            # ask how to proceed
+            choice = g.buttonbox(
+                "Do you wish to continue with current threshold calibration?\nYou can choose to repeat this process on the next region.",
+                "Confirmation",
+                choices=["Cancel", "Confirm and continue.", "Repeat calibration on next scan."]
+            )
+            if choice == "Cancel": return
+            SerialED_chunk.mask = SED_VBF_mask & SED_VADF_mask & SED_radial_mask # merge all masks
+            if choice == "Confirm and continue.":
+                SerialED_info['dataviewer_calibration_enabled'] = False # ensures no more dataviewer calibration
+                SerialED_info['VBF_threshold'] = SED_VBF_threshold.get() # pass new thresholds to SerialED()
+                SerialED_info['VADF_threshold'] = SED_VADF_threshold.get()
+                SerialED_info['radial_threshold'] = SED_radial_threshold.get()
+                root.destroy()
+            elif choice == "Repeat calibration on next scan.":
+                SerialED_info['VBF_threshold'] = SED_VBF_threshold.get()
+                SerialED_info['VADF_threshold'] = SED_VADF_threshold.get()
+                SerialED_info['radial_threshold'] = SED_radial_threshold.get()
+                root.destroy()
+
         # disable all 5 load buttons
         for button in [button1, button2, button3, button4, button5]:
             button.config(state='disabled')
 
         # declare variables, all floats from 0 to 1
-        SED_VBF_threshold = tk.DoubleVar(value=0.1)
-        SED_VADF_threshold = tk.DoubleVar(value=0.1)
-        SED_radial_threshold = tk.DoubleVar(value=0.9)
+        SED_VBF_threshold = tk.DoubleVar(value=SerialED_info['VBF_threshold'])
+        SED_VADF_threshold = tk.DoubleVar(value=SerialED_info['VADF_threshold'])
+        SED_radial_threshold = tk.DoubleVar(value=SerialED_info['radial_threshold'])
         SED_VBF_opacity = tk.DoubleVar(value=0.5)
         SED_VADF_opacity = tk.DoubleVar(value=0.5)
         SED_radial_opacity = tk.DoubleVar(value=0.5)
@@ -1718,16 +1744,20 @@ def visualiser(SerialED_chunk = None):
         SerialED_frame = tk.Frame(right_panel)
         SerialED_frame.pack(fill="both", expand=True, padx=5, pady=(0, 5))
 
-        # three panels, each with a slider and entry box
+        # three horizontally aligned panels, each with a slider and entry box
         SED_frame1 = tk.Frame(SerialED_frame,highlightthickness=1,
                                highlightbackground="black",highlightcolor="black")
-        SED_frame1.grid(row=0, column=0, sticky="w", pady=(10, 0), padx=(0, 20))
+        SED_frame1.grid(row=0, column=0, sticky="we", pady=(10, 0), padx=(0, 20))
         SED_frame2 = tk.Frame(SerialED_frame,highlightthickness=1,
                                highlightbackground="black",highlightcolor="black")
-        SED_frame2.grid(row=0, column=1, sticky="w", pady=(10, 0), padx=(0, 20))
+        SED_frame2.grid(row=0, column=1, sticky="we", pady=(10, 0), padx=(0, 20))
         SED_frame3 = tk.Frame(SerialED_frame,highlightthickness=1,
                                highlightbackground="black",highlightcolor="black")
-        SED_frame3.grid(row=0, column=2, sticky="w", pady=(10, 0))
+        SED_frame3.grid(row=0, column=2, sticky="we", pady=(10, 0), padx=(0, 20))
+
+        # one button on the right for closing the GUI
+        SED_finish_button = tk.Button(SerialED_frame, text='Finish', command=SED_finish)
+        SED_finish_button.grid(row=0, column=3, sticky="ns", pady=(10, 0))
 
         def add_SED_widgets(parent, text, ent_init):
             ttk.Label(parent, text=text).pack(anchor="n")
@@ -1793,6 +1823,6 @@ if __name__ == "__main__":
     dataset = SerialED_chunk.SerialED_chunk(image_array, metadata={})
     dataset.metadata['e_current'] = 10e-12
     dataset.metadata['dwell_time'] = 20e-3
-    visualiser(SerialED_chunk=dataset)
+    visualiser(SerialED_mode=True, SerialED_chunk=dataset)
 
     # visualiser(SerialED_chunk=True)
