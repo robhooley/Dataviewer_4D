@@ -582,7 +582,7 @@ def visualiser(SerialED_info = None, SerialED_chunk = None):
         resized_main = main_image_pil.resize((iw, ih), Image.NEAREST)
         resized_main = ensure_rgb(resized_main)
 
-        # --- draw masks id SerialED mode is used
+        # --- draw masks if SerialED mode is used
         if SerialED_chunk is not None:
             def apply_mask_rgba(base_rgba: Image.Image,
                                 mask_bool: np.ndarray,
@@ -1687,7 +1687,7 @@ def visualiser(SerialED_info = None, SerialED_chunk = None):
                 SED_VADF_mask = np.logical_not(SerialED_chunk.mask)  # memorize VBF mask
 
             elif ID == 'radial':
-                SerialED_chunk.filter_with_radialI(SED_radial_threshold.get())  # calculate radialI mask TODO make filter_with_radialI
+                SerialED_chunk.filter_with_radial_intensity_peaks(SED_radial_threshold.get())  # calculate radialI mask
                 SED_radial_mask = np.logical_not(SerialED_chunk.mask)  # memorize VBF mask
 
             update_main_image()
@@ -1734,11 +1734,10 @@ def visualiser(SerialED_info = None, SerialED_chunk = None):
                                        SerialED_chunk.scan_width), dtype=bool)
         SerialED_chunk.filter_with_VADF(SED_VADF_threshold.get())  # calculate VADF mask
         SED_VADF_mask = np.logical_not(SerialED_chunk.mask)  # memorize VADF mask
-        SED_radial_mask = SerialED_chunk.mask #TODO calculate radial intensity mask
-
-        #testing
-        print(f'VBF mask: {np.average(SED_VBF_mask)}')
-        print(f'VADF mask: {np.average(SED_VADF_mask)}')
+        SerialED_chunk.mask = np.ones((SerialED_chunk.scan_width,
+                                       SerialED_chunk.scan_width), dtype=bool)
+        SerialED_chunk.filter_with_radial_intensity_peaks(SED_radial_threshold.get())  # calculate radialI mask
+        SED_radial_mask = np.logical_not(SerialED_chunk.mask)  # memorize radialI mask
 
         # instead of metadata frame, create frame with SerialED controls
         SerialED_frame = tk.Frame(right_panel)
@@ -1778,12 +1777,13 @@ def visualiser(SerialED_info = None, SerialED_chunk = None):
         VBF_mask_slider.configure(variable=SED_VBF_threshold, command=lambda v: SED_on_threshold_change("VBF", v))
         VBF_mask_ent.configure(textvariable=SED_VBF_opacity)
 
-        VADF_mask_slider, VADF_mask_ent = add_SED_widgets(SED_frame2, "Direct beam mask", SED_VADF_opacity.get())
+        VADF_mask_slider, VADF_mask_ent = add_SED_widgets(SED_frame2, "Vacuum mask", SED_VADF_opacity.get())
         VADF_mask_slider.configure(variable=SED_VADF_threshold, command=lambda v: SED_on_threshold_change("VADF", v))
         VADF_mask_ent.configure(textvariable=SED_VADF_opacity)
 
         radial_mask_slider, radial_mask_ent = add_SED_widgets(SED_frame3, "Amorphous signal mask", SED_radial_opacity.get())
-        radial_mask_slider.configure(variable=SED_radial_threshold, command=lambda v: SED_on_threshold_change("radial", v))
+        radial_mask_slider.configure(variable=SED_radial_threshold, from_=0, to=20, resolution=1,
+                                     command=lambda v: SED_on_threshold_change("radial", v))
         radial_mask_ent.configure(textvariable=SED_radial_opacity)
 
         # bind entry boxes
@@ -1814,15 +1814,22 @@ def visualiser(SerialED_info = None, SerialED_chunk = None):
     # Start the Tkinter main loop
     root.mainloop()
 
-#visualiser()
 if __name__ == "__main__":
+    # visualiser()
+
     # testing
     import SerialED_chunk
     import basics as b
-    image_array = b.open_tiff_series(directory="C:\\Users\\daniel.stasko\\Documents\\Dan_coding\\test_datasets\\serialED\\KGW powder-4D STEM 1-50854\\CameraImageSeries")
+    image_array = b.load_tiff_series(directory="C:\\Users\\daniel.stasko\\Documents\\Dan_coding\\test_datasets\\serialED\\KGW powder-4D STEM 1-50854\\CameraImageSeries")
     dataset = SerialED_chunk.SerialED_chunk(image_array, metadata={})
     dataset.metadata['e_current'] = 10e-12
     dataset.metadata['dwell_time'] = 20e-3
-    visualiser(SerialED_mode=True, SerialED_chunk=dataset)
+    SerialED_info = {
+        'dataviewer_calibration_enabled': True,
+        'VBF_threshold': 0.1,
+        'VADF_threshold': 0.1,
+        'radial_threshold': 1e-4,
+    }
+    visualiser(SerialED_info=SerialED_info, SerialED_chunk=dataset)
 
     # visualiser(SerialED_chunk=True)
