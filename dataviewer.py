@@ -134,12 +134,16 @@ def _resize_preserve_aspect(img_pil, max_side=1024):
 
 
 
-def visualiser(SerialED_info = None, SerialED_chunk = None):
+def visualiser(ROOT=None, SerialED_info = None, SerialED_chunk = None):
     """
     Creates a Tkinter application for visualising a 4D STEM array with import, export and saving functionality.
     If SerialED_mode, use dataviewer in a modified way, viewing the SerialED_chunk dataset
     """
-    root = tk.Tk()
+    # create a toplevel window instead of root if called by SerialED, which already has its tk.root
+    if ROOT is None:
+        root = tk.Tk()
+    else:
+        root = tk.Toplevel(ROOT)
     root.title("4D Array Visualiser")
     root.grid_rowconfigure(0, weight=1)  # canvases
     root.grid_columnconfigure(0, weight=1)  # left panel
