@@ -12,6 +12,12 @@ import numpy as np
 import json
 import easygui as g
 
+import argparse
+import sys
+import numpy as np
+import json
+import os
+
 # Global variable to control mouse motion functionality
 mouse_motion_enabled = True  # Initially enabled
 
@@ -134,16 +140,12 @@ def _resize_preserve_aspect(img_pil, max_side=1024):
 
 
 
-def visualiser(ROOT=None, SerialED_info = None, SerialED_chunk = None):
+def visualiser(SerialED_info = None, SerialED_chunk = None, return_path = None):
     """
     Creates a Tkinter application for visualising a 4D STEM array with import, export and saving functionality.
     If SerialED_mode, use dataviewer in a modified way, viewing the SerialED_chunk dataset
     """
-    # create a toplevel window instead of root if called by SerialED, which already has its tk.root
-    if ROOT is None:
-        root = tk.Tk()
-    else:
-        root = tk.Toplevel(ROOT)
+    root = tk.Tk()
     root.title("4D Array Visualiser")
     root.grid_rowconfigure(0, weight=1)  # canvases
     root.grid_columnconfigure(0, weight=1)  # left panel
@@ -1710,11 +1712,16 @@ def visualiser(ROOT=None, SerialED_info = None, SerialED_chunk = None):
                 SerialED_info['VBF_threshold'] = SED_VBF_threshold.get() # pass new thresholds to SerialED()
                 SerialED_info['VADF_threshold'] = SED_VADF_threshold.get()
                 SerialED_info['radial_threshold'] = SED_radial_threshold.get()
+                with open(return_path, "w") as f:
+                    json.dump(SerialED_info, f)
+
                 root.destroy()
             elif choice == "Repeat calibration on next scan.":
                 SerialED_info['VBF_threshold'] = SED_VBF_threshold.get()
                 SerialED_info['VADF_threshold'] = SED_VADF_threshold.get()
                 SerialED_info['radial_threshold'] = SED_radial_threshold.get()
+                with open(return_path, "w") as f:
+                    json.dump(SerialED_info, f)
                 root.destroy()
 
         # disable all 5 load buttons
@@ -1815,25 +1822,47 @@ def visualiser(ROOT=None, SerialED_info = None, SerialED_chunk = None):
 
     main_canvas.bind("<Configure>", _refresh_main)
     pointer_canvas.bind("<Configure>", _refresh_pointer)
+
     # Start the Tkinter main loop
     root.mainloop()
 
+
+
+
 if __name__ == "__main__":
-    # visualiser()
+    import argparse, json, numpy as np, os
 
-    # testing
-    import SerialED_chunk
-    import basics as b
-    image_array = b.load_tiff_series(directory="C:\\Users\\daniel.stasko\\Documents\\Dan_coding\\test_datasets\\serialED\\KGW powder-4D STEM 1-50854\\CameraImageSeries")
-    dataset = SerialED_chunk.SerialED_chunk(image_array, metadata={})
-    dataset.metadata['e_current'] = 10e-12
-    dataset.metadata['dwell_time'] = 20e-3
-    SerialED_info = {
-        'dataviewer_calibration_enabled': True,
-        'VBF_threshold': 0.1,
-        'VADF_threshold': 0.1,
-        'radial_threshold': 1e-4,
-    }
-    visualiser(SerialED_info=SerialED_info, SerialED_chunk=dataset)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--from-serialed", action="store_true")
+    parser.add_argument("--array-path")
+    parser.add_argument("--meta-path")
+    parser.add_argument("--info-path")
+    parser.add_argument("--return-path")
+    args = parser.parse_args()
 
-    # visualiser(SerialED_chunk=True)
+    if args.from_serialed:
+        # Load the array
+        array = np.load(args.array_path)
+
+        # Load metadata
+        with open(args.meta_path) as f:
+            metadata = json.load(f)
+
+        # Load SerialED_info
+        with open(args.info_path) as f:
+            SerialED_info = json.load(f)
+
+        # Reconstruct data_chunk instance
+        from SerialED_chunk import SerialED_chunk
+        data_chunk = SerialED_chunk(array, metadata)
+
+        # Run the GUI in SerialED mode
+        visualiser(
+            SerialED_info=SerialED_info,
+            SerialED_chunk=data_chunk,
+            return_path=args.return_path    # pass path for sending info back
+        )
+    else:
+        visualiser()
+
+
