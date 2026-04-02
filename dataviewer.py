@@ -10,13 +10,10 @@ import tifffile as tiff
 import threading,queue
 import numpy as np
 import json
-import easygui as g
-
 import argparse
 import sys
-import numpy as np
-import json
 import os
+import easygui as g
 
 # Global variable to control mouse motion functionality
 mouse_motion_enabled = True  # Initially enabled
