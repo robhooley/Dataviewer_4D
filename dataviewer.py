@@ -614,7 +614,7 @@ def visualiser(SerialED_info = None, SerialED_chunk = None, return_path = None):
             # apply 3 masks
             base = resized_main.convert("RGBA") # base image
             base = apply_mask_rgba(base, SED_VBF_mask, color=(255, 0, 0), alpha=int(SED_VBF_opacity.get() * 255)) #1st mask
-            base = apply_mask_rgba(base, SED_VADF_mask, color=(0, 255, 0), alpha=int(SED_VADF_opacity.get() * 255)) #2nd mask
+            base = apply_mask_rgba(base, SED_resolution_mask, color=(0, 255, 0), alpha=int(SED_resolution_opacity.get() * 255)) #2nd mask
             base = apply_mask_rgba(base, SED_radial_mask, color=(0, 0, 255), alpha=int(SED_radial_opacity.get() * 255)) #3rd mask
             resized_main = base.convert("RGB")
 
@@ -1677,7 +1677,7 @@ def visualiser(SerialED_info = None, SerialED_chunk = None, return_path = None):
             update_main_image()
 
         def SED_on_threshold_change(ID, value):
-            nonlocal SerialED_chunk, SED_VBF_mask, SED_VADF_mask, SED_radial_mask
+            nonlocal SerialED_chunk, SED_VBF_mask, SED_resolution_mask, SED_radial_mask
             SerialED_chunk.mask = np.ones((SerialED_chunk.scan_width,
                                            SerialED_chunk.scan_width), dtype=bool)  # clear mask
 
@@ -1685,9 +1685,9 @@ def visualiser(SerialED_info = None, SerialED_chunk = None, return_path = None):
                 SerialED_chunk.filter_with_VBF(SED_VBF_threshold.get())  # calculate VBF mask
                 SED_VBF_mask = np.logical_not(SerialED_chunk.mask)  # memorize VBF mask
 
-            elif ID == 'VADF':
-                SerialED_chunk.filter_with_VADF(SED_VADF_threshold.get())  # calculate VADF mask
-                SED_VADF_mask = np.logical_not(SerialED_chunk.mask)  # memorize VBF mask
+            elif ID == 'resolution':
+                SerialED_chunk.filter_with_resolution(SED_resolution_threshold.get())  # calculate resolution mask
+                SED_resolution_mask = np.logical_not(SerialED_chunk.mask)  # memorize VBF mask
 
             elif ID == 'radial':
                 SerialED_chunk.filter_with_radial_intensity_peaks(SED_radial_threshold.get())  # calculate radialI mask
@@ -1703,11 +1703,11 @@ def visualiser(SerialED_info = None, SerialED_chunk = None, return_path = None):
                 choices=["Cancel", "Confirm and continue.", "Repeat calibration on next scan."]
             )
             if choice == "Cancel": return
-            SerialED_chunk.mask = SED_VBF_mask & SED_VADF_mask & SED_radial_mask # merge all masks
+            SerialED_chunk.mask = SED_VBF_mask & SED_resolution_mask & SED_radial_mask # merge all masks
             if choice == "Confirm and continue.":
                 SerialED_info['dataviewer_calibration_enabled'] = False # ensures no more dataviewer calibration
                 SerialED_info['VBF_threshold'] = SED_VBF_threshold.get() # pass new thresholds to SerialED()
-                SerialED_info['VADF_threshold'] = SED_VADF_threshold.get()
+                SerialED_info['resolution_threshold'] = SED_resolution_threshold.get()
                 SerialED_info['radial_threshold'] = SED_radial_threshold.get()
                 with open(return_path, "w") as f:
                     json.dump(SerialED_info, f)
@@ -1715,7 +1715,7 @@ def visualiser(SerialED_info = None, SerialED_chunk = None, return_path = None):
                 root.destroy()
             elif choice == "Repeat calibration on next scan.":
                 SerialED_info['VBF_threshold'] = SED_VBF_threshold.get()
-                SerialED_info['VADF_threshold'] = SED_VADF_threshold.get()
+                SerialED_info['resolution_threshold'] = SED_resolution_threshold.get()
                 SerialED_info['radial_threshold'] = SED_radial_threshold.get()
                 with open(return_path, "w") as f:
                     json.dump(SerialED_info, f)
@@ -1727,10 +1727,10 @@ def visualiser(SerialED_info = None, SerialED_chunk = None, return_path = None):
 
         # declare variables, all floats from 0 to 1
         SED_VBF_threshold = tk.DoubleVar(value=SerialED_info['VBF_threshold'])
-        SED_VADF_threshold = tk.DoubleVar(value=SerialED_info['VADF_threshold'])
+        SED_resolution_threshold = tk.DoubleVar(value=SerialED_info['resolution_threshold'])
         SED_radial_threshold = tk.DoubleVar(value=SerialED_info['radial_threshold'])
         SED_VBF_opacity = tk.DoubleVar(value=0.5)
-        SED_VADF_opacity = tk.DoubleVar(value=0.5)
+        SED_resolution_opacity = tk.DoubleVar(value=0.5)
         SED_radial_opacity = tk.DoubleVar(value=0.5)
 
         # calculate initial masks
@@ -1740,8 +1740,8 @@ def visualiser(SerialED_info = None, SerialED_chunk = None, return_path = None):
         SED_VBF_mask = np.logical_not(SerialED_chunk.mask)  # memorize VBF mask
         SerialED_chunk.mask = np.ones((SerialED_chunk.scan_width,
                                        SerialED_chunk.scan_width), dtype=bool)
-        SerialED_chunk.filter_with_VADF(SED_VADF_threshold.get())  # calculate VADF mask
-        SED_VADF_mask = np.logical_not(SerialED_chunk.mask)  # memorize VADF mask
+        SerialED_chunk.filter_with_resolution(SED_resolution_threshold.get())  # calculate resolution mask
+        SED_resolution_mask = np.logical_not(SerialED_chunk.mask)  # memorize resolution mask
         SerialED_chunk.mask = np.ones((SerialED_chunk.scan_width,
                                        SerialED_chunk.scan_width), dtype=bool)
         SerialED_chunk.filter_with_radial_intensity_peaks(SED_radial_threshold.get())  # calculate radialI mask
@@ -1785,17 +1785,21 @@ def visualiser(SerialED_info = None, SerialED_chunk = None, return_path = None):
         VBF_mask_slider.configure(variable=SED_VBF_threshold, command=lambda v: SED_on_threshold_change("VBF", v))
         VBF_mask_ent.configure(textvariable=SED_VBF_opacity)
 
-        VADF_mask_slider, VADF_mask_ent = add_SED_widgets(SED_frame2, "Vacuum mask", SED_VADF_opacity.get())
-        VADF_mask_slider.configure(variable=SED_VADF_threshold, command=lambda v: SED_on_threshold_change("VADF", v))
-        VADF_mask_ent.configure(textvariable=SED_VADF_opacity)
+        resolution_mask_slider, resolution_mask_ent = add_SED_widgets(SED_frame2, "Resolution mask", SED_resolution_opacity.get())
+        # computes the max achievable resolution of given diff patterns
+        resolution_max = SerialED_chunk.metadata['diff_size']/SerialED_chunk.metadata['wavelength']*SerialED_chunk.radialI.shape[1]/SerialED_chunk.diff_width
+        resolution_max = np.ceil(resolution_max * 20) / 20 # round up to 0.05
+        resolution_mask_slider.configure(variable=SED_resolution_threshold, from_=0, to=resolution_max, resolution=0.05,
+                                         command=lambda v: SED_on_threshold_change("resolution", v))
+        resolution_mask_ent.configure(textvariable=SED_resolution_opacity)
 
         radial_mask_slider, radial_mask_ent = add_SED_widgets(SED_frame3, "Amorphous signal mask", SED_radial_opacity.get())
-        radial_mask_slider.configure(variable=SED_radial_threshold, from_=0, to=20, resolution=1,
+        radial_mask_slider.configure(variable=SED_radial_threshold, from_=0, to=15, resolution=1,
                                      command=lambda v: SED_on_threshold_change("radial", v))
         radial_mask_ent.configure(textvariable=SED_radial_opacity)
 
         # bind entry boxes
-        for ent in [VBF_mask_ent,VADF_mask_ent,radial_mask_ent]:
+        for ent in [VBF_mask_ent,resolution_mask_ent,radial_mask_ent]:
             ent.bind("<Return>", lambda e: (SED_on_mask_change(e), "break"))
             ent.bind("<FocusOut>", lambda e: SED_on_mask_change(e))
 
